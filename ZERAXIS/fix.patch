@@ -1,0 +1,23 @@
+--- engines/discovery/internal/repository/postgres.go
++++ engines/discovery/internal/repository/postgres.go
+@@ -147,15 +147,16 @@
+ 			a.Labels = make(map[string]string)
+ 		}
+ 
++		assets = append(assets, a)
++	}
++	rows.Close()
++	
++	for i := range assets {
+ 		// Load ports
+-		a.Ports, _ = p.getAssetPorts(ctx, a.AssetID)
++		assets[i].Ports, _ = p.getAssetPorts(ctx, assets[i].AssetID)
+ 		// Load networks
+-		a.Networks, _ = p.getAssetNetworks(ctx, a.AssetID)
+-
+-		assets = append(assets, a)
++		assets[i].Networks, _ = p.getAssetNetworks(ctx, assets[i].AssetID)
+ 	}
+ 
+ 	return assets, rows.Err()
+ }

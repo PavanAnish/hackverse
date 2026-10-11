@@ -1,0 +1,42 @@
+# ZERAXIS Falco Configuration
+# Phase 5 Stage 1 - Runtime Monitoring
+# Falco 0.44.1 with Modern eBPF driver
+
+engine:
+  kind: modern_ebpf
+
+# JSON output for machine parsing
+json_output: true
+json_include_output_property: true
+json_include_tags_property: true
+
+# File output to shared volume for Runtime Engine consumption
+file_output:
+  enabled: true
+  keep_alive: true
+  filename: /var/run/falco/events.jsonl
+
+# Disable other outputs
+stdout_output:
+  enabled: false
+
+syslog_output:
+  enabled: false
+
+http_output:
+  enabled: false
+
+# Buffered output for performance
+buffered_outputs: true
+
+# Only load ZERAXIS rules
+rules_files:
+  - /etc/falco/falco_rules.local.yaml
+
+# Syscall buffer size (8MB per CPU pair)
+syscall_buf_size_preset: 4
+
+# Health webserver (internal only)
+webserver:
+  enabled: true
+  listen_port: 8765

@@ -1,0 +1,88 @@
+# ZERAXIS — .gitignore
+
+# === Binaries and Build Output ===
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+engines/*/main
+engines/*/server
+
+# Go test cache and coverage
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# === Logs and Debug Output (dev artifacts from lab runs) ===
+*.log
+*.log.*
+nats_event_output.txt
+raw_test_output.txt
+scan-events*.log
+test-output.log
+
+# === Environment Files ===
+.env
+.env.local
+
+# === Discord Integration ===
+integrations/discord/.venv/
+integrations/discord/outbox.db
+integrations/discord/.env
+.env.*.local
+*.env
+
+# === Docker and Compose Overrides ===
+docker-compose.override.yml
+docker-compose.local.yml
+
+# === OS Files ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# === IDE Files ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === PostgreSQL / Database Dumps ===
+*.sql.gz
+*.dump
+*.pgdump
+pgdata/
+postgres_data/
+
+# === Temporary Files ===
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+
+# === Go Module Cache (local vendor) ===
+vendor/
+
+# === Test Artifacts ===
+testdata/output/
+*_integration_report.txt
+
+# === Certificates (never commit private keys) ===
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Note: infrastructure/docker/postgres/init.sql is committed intentionally
+# Note: engines/*/migrations/*.sql are committed intentionally

@@ -1,0 +1,40 @@
+--- PASS: TestNoForbiddenExecution (0.00s)
+PASS
+--- PASS: TestCanonicalRepoDigest_Valid (0.00s)
+--- PASS: TestCanonicalRepoDigest_MissingAt (0.00s)
+--- PASS: TestCanonicalRepoDigest_Tag (0.00s)
+--- PASS: TestCanonicalRepoDigest_Malformed (0.00s)
+--- PASS: TestValidateTargetDigest_Valid (0.00s)
+--- PASS: TestValidateTargetDigest_ImageID_Rejected (0.00s)
+--- PASS: TestValidateTargetDigest_Invalid (0.00s)
+--- PASS: TestRepoDigestsContain_Match (0.00s)
+--- PASS: TestRepoDigestsContain_Mismatch (0.00s)
+--- PASS: TestRepoDigestsContain_ImageID_Cannot_Authorize (0.00s)
+--- PASS: TestRepoDigestsContain_MalformedEntries_Skipped (0.00s)
+--- PASS: TestRepoDigestsContain_Empty (0.00s)
+--- FAIL: TestIntegration_DockerNATSExecution (0.89s)
+--- FAIL: TestSecurity_OciDigestMismatch (0.01s)
+--- FAIL: TestSecurity_ImageID_Negative (0.01s)
+--- FAIL: TestApprovals_ProposedToApproved (0.01s)
+--- FAIL: TestApprovals_AlreadyApproved_Rejected (0.01s)
+--- FAIL: TestApprovals_EmptyApprover_Rejected (0.02s)
+--- PASS: TestApprovals_MissingRecommendation_Rejected (0.01s)
+--- FAIL: TestConcurrency_DuplicateAuthorization (0.01s)
+--- PASS: TestExecutor (0.00s)
+=== RUN   TestVerification_Success
+--- FAIL: TestVerification_Success (0.01s)
+=== RUN   TestVerification_RunningState
+--- FAIL: TestVerification_RunningState (0.01s)
+=== RUN   TestVerification_RestartingState
+--- FAIL: TestVerification_RestartingState (0.01s)
+=== RUN   TestVerification_DigestMismatch
+--- FAIL: TestVerification_DigestMismatch (0.01s)
+=== RUN   TestVerification_ContainerIDMismatch
+--- FAIL: TestVerification_ContainerIDMismatch (0.01s)
+=== RUN   TestVerification_InspectFailure
+--- FAIL: TestVerification_InspectFailure (0.01s)
+=== RUN   TestVerification_MultipleRepoDigests
+--- FAIL: TestVerification_MultipleRepoDigests (0.01s)
+=== RUN   TestVerification_ImageIDNegative
+--- FAIL: TestVerification_ImageIDNegative (0.01s)
+=== RUN   TestVerification_EventEmission

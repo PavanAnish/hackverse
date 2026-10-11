@@ -1,0 +1,40 @@
+--- PASS: TestAPI_UnauthorizedApprove (0.02s)
+--- FAIL: TestAPI_ValidApprove (0.01s)
+--- FAIL: TestAPI_ApproveInvalidState (0.01s)
+--- FAIL: TestAPI_RevokeApproved (0.01s)
+--- FAIL: TestAPI_RevokeExecutingRejection (0.01s)
+--- FAIL: TestAPI_AbandonExecuting (0.01s)
+--- FAIL: TestAPI_AbandonNonExecutingRejection (0.01s)
+--- PASS: TestAPI_SpoofedIdentityRejected (0.01s)
+FAIL
+FAIL	github.com/pavanvanish/zeraxis/engines/correlation/internal/api	0.321s
+--- PASS: TestT1_SingleFindingCreatesOneIncident (0.16s)
+    correlator_test.go:136: Test 2 FAIL: expected 1 incident, got 0
+    correlator_test.go:139: Test 2 FAIL: expected 1 link, got 0
+--- FAIL: TestT2_DuplicateFindingIdempotent (0.21s)
+--- PASS: TestT7_DifferentHourBucketNewIncident (0.00s)
+--- PASS: TestT9_CrossAssetCorrelationDeferred (0.00s)
+--- PASS: TestT13_PostgresFailureNoNATSEvent (0.00s)
+--- PASS: TestT17_DuplicateFloodBounded (0.45s)
+--- PASS: TestMaxSeverity (0.00s)
+--- PASS: TestSeverityMonotonicallyIncreases (0.34s)
+--- PASS: TestConcurrentFindingFlood (0.40s)
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=13599ac4-54da-469d-9e4d-e7b7e37a2855 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=b7ec15d3-06c1-435a-be11-8feced1a6596 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=b7ec15d3-06c1-435a-be11-8feced1a6596 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f631044b-7424-4773-b8b0-cd89bbd846d6 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f631044b-7424-4773-b8b0-cd89bbd846d6 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f631044b-7424-4773-b8b0-cd89bbd846d6 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f631044b-7424-4773-b8b0-cd89bbd846d6 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f631044b-7424-4773-b8b0-cd89bbd846d6 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=8e687a16-cfcb-463c-9d98-96e2b2702132 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=ec1bb40a-d339-479c-acd7-9b2372c149d0 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=149ab9b7-8bab-4fd4-b32f-223a14618f27 event_type=EXECUTION_FAILED
+2026/09/12 11:33:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=0ce6199f-927a-4a33-91ed-b5f1e68e0bb8 event_type=EXECUTION_FAILED
+--- PASS: TestExecutionHandler_RecoveryGeneration (0.15s)
+    --- PASS: TestExecutionHandler_RecoveryGeneration/Standard_Recovery_-_Postcondition_Not_Met (0.01s)
+    --- PASS: TestExecutionHandler_RecoveryGeneration/Duplicate_Event_-_Idempotent_ON_CONFLICT_DO_NOTHING (0.00s)
+    --- PASS: TestExecutionHandler_RecoveryGeneration/Concurrent_Duplicate_Processing (0.03s)
+    --- PASS: TestExecutionHandler_RecoveryGeneration/Max_Depth_Bound (0.00s)
+    --- PASS: TestExecutionHandler_RecoveryGeneration/Resolved_Incident (0.00s)
+    --- PASS: TestExecutionHandler_RecoveryGeneration/No_Recovery_Mapped_-_Target_Missing (0.00s)

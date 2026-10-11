@@ -1,0 +1,286 @@
+?   	github.com/pavanvanish/zeraxis/engines/correlation/cmd/correlation	[no test files]
+=== RUN   TestAPI_UnauthorizedApprove
+    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAPI_UnauthorizedApprove (0.00s)
+=== RUN   TestAPI_ValidApprove
+    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAPI_ValidApprove (0.00s)
+=== RUN   TestAPI_ApproveInvalidState
+    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAPI_ApproveInvalidState (0.00s)
+=== RUN   TestAPI_RevokeApproved
+    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAPI_RevokeApproved (0.00s)
+=== RUN   TestAPI_RevokeExecutingRejection
+    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAPI_RevokeExecutingRejection (0.00s)
+=== RUN   TestAPI_AbandonExecuting
+    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAPI_AbandonExecuting (0.00s)
+=== RUN   TestAPI_AbandonNonExecutingRejection
+    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAPI_AbandonNonExecutingRejection (0.00s)
+=== RUN   TestAPI_SpoofedIdentityRejected
+    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAPI_SpoofedIdentityRejected (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/api	1.527s
+=== RUN   TestT1_SingleFindingCreatesOneIncident
+    correlator_test.go:110: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT1_SingleFindingCreatesOneIncident (0.00s)
+=== RUN   TestT2_DuplicateFindingIdempotent
+    correlator_test.go:125: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT2_DuplicateFindingIdempotent (0.00s)
+=== RUN   TestT3_TwoFindingsSameWindowGrouped
+    correlator_test.go:146: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT3_TwoFindingsSameWindowGrouped (0.00s)
+=== RUN   TestT4_UnrelatedAssetsTwoIncidents
+    correlator_test.go:162: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT4_UnrelatedAssetsTwoIncidents (0.00s)
+=== RUN   TestT5_SameAssetDifferentContainerSeparated
+    correlator_test.go:183: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT5_SameAssetDifferentContainerSeparated (0.00s)
+=== RUN   TestT6_DifferentDigestSeparateIncident
+    correlator_test.go:219: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT6_DifferentDigestSeparateIncident (0.00s)
+=== RUN   TestT7_DifferentHourBucketNewIncident
+--- PASS: TestT7_DifferentHourBucketNewIncident (0.00s)
+=== RUN   TestT8_CrossAssetNoNetworkNoCorrelation
+    correlator_test.go:262: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT8_CrossAssetNoNetworkNoCorrelation (0.00s)
+=== RUN   TestT9_CrossAssetCorrelationDeferred
+    correlator_test.go:281: DEFERRED (Phase 6.3+): Cross-asset correlation requires Discovery NETWORK_MEMBERSHIP evidence. Not implemented in Phase 6.2. Each asset independently produces its own incident.
+--- PASS: TestT9_CrossAssetCorrelationDeferred (0.00s)
+=== RUN   TestT10_OutOfOrderFindingsDeterministic
+    correlator_test.go:288: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT10_OutOfOrderFindingsDeterministic (0.00s)
+=== RUN   TestT11_MalformedFindingRejectedSafely
+    correlator_test.go:312: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT11_MalformedFindingRejectedSafely (0.00s)
+=== RUN   TestT12_OversizedPayloadRejected
+    correlator_test.go:347: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT12_OversizedPayloadRejected (0.00s)
+=== RUN   TestT13_PostgresFailureNoNATSEvent
+    correlator_test.go:371: DOCUMENTED: If repo.CreateIncidentWithFinding returns error, finding is NOT marked as seen (retryable on next NATS delivery). NATS event is only published after successful Postgres commit. This is verified by code inspection of correlator.go HandleFinding().
+--- PASS: TestT13_PostgresFailureNoNATSEvent (0.00s)
+=== RUN   TestT14_NATSFailureIncidentDurable
+    correlator_test.go:380: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT14_NATSFailureIncidentDurable (0.00s)
+=== RUN   TestT15_IncidentsDurableAcrossRestart
+    correlator_test.go:395: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT15_IncidentsDurableAcrossRestart (0.00s)
+=== RUN   TestT16_BoundedIncidentCreation
+    correlator_test.go:420: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT16_BoundedIncidentCreation (0.00s)
+=== RUN   TestT17_DuplicateFloodBounded
+    correlator_test.go:450: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestT17_DuplicateFloodBounded (0.00s)
+=== RUN   TestMaxSeverity
+--- PASS: TestMaxSeverity (0.00s)
+=== RUN   TestSeverityMonotonicallyIncreases
+    correlator_test.go:493: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestSeverityMonotonicallyIncreases (0.00s)
+=== RUN   TestConcurrentFindingFlood
+    correlator_test.go:515: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestConcurrentFindingFlood (0.00s)
+=== RUN   TestExecutionHandler_RecoveryGeneration
+    execution_handler_test.go:100: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+--- SKIP: TestExecutionHandler_RecoveryGeneration (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/correlator	2.526s
+?   	github.com/pavanvanish/zeraxis/engines/correlation/internal/models	[no test files]
+=== RUN   TestValidateExecutionTarget
+=== RUN   TestValidateExecutionTarget/TEST_1_-_Valid_identity
+=== RUN   TestValidateExecutionTarget/TEST_2_-_Asset_mismatch
+=== RUN   TestValidateExecutionTarget/TEST_3_-_Container_replacement
+=== RUN   TestValidateExecutionTarget/TEST_4_-_Image_replacement
+=== RUN   TestValidateExecutionTarget/TEST_5_-_Missing_asset_ID
+=== RUN   TestValidateExecutionTarget/TEST_6_-_Missing_container_ID
+=== RUN   TestValidateExecutionTarget/TEST_7_-_Missing_image_digest
+=== RUN   TestValidateExecutionTarget/TEST_8_-_Historical_recommendation_without_target_identity
+=== RUN   TestValidateExecutionTarget/TEST_11_-_D1_to_D2
+=== RUN   TestValidateExecutionTarget/TEST_12_-_C1_to_C2
+--- PASS: TestValidateExecutionTarget (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_1_-_Valid_identity (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_2_-_Asset_mismatch (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_3_-_Container_replacement (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_4_-_Image_replacement (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_5_-_Missing_asset_ID (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_6_-_Missing_container_ID (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_7_-_Missing_image_digest (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_8_-_Historical_recommendation_without_target_identity (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_11_-_D1_to_D2 (0.00s)
+    --- PASS: TestValidateExecutionTarget/TEST_12_-_C1_to_C2 (0.00s)
+=== RUN   TestBuildRec_AuthoritativeTargets
+--- PASS: TestBuildRec_AuthoritativeTargets (0.00s)
+=== RUN   TestBuildRec_EvidenceInjection_Test9
+--- PASS: TestBuildRec_EvidenceInjection_Test9 (0.00s)
+=== RUN   TestBuildRec_MaliciousTargetID_Test10
+--- PASS: TestBuildRec_MaliciousTargetID_Test10 (0.00s)
+=== RUN   TestComputeFingerprint_ConcurrentGeneration_Test13
+--- PASS: TestComputeFingerprint_ConcurrentGeneration_Test13 (0.00s)
+=== RUN   TestMapFailureToAction
+=== RUN   TestMapFailureToAction/POSTCONDITION_NOT_MET
+=== RUN   TestMapFailureToAction/MUTATION_FAILED
+=== RUN   TestMapFailureToAction/IMAGE_DIGEST_MISMATCH
+=== RUN   TestMapFailureToAction/TARGET_IDENTITY_MISMATCH
+=== RUN   TestMapFailureToAction/TARGET_MISSING
+=== RUN   TestMapFailureToAction/DOCKER_UNAVAILABLE
+=== RUN   TestMapFailureToAction/DENY_from_phase_7.2
+=== RUN   TestMapFailureToAction/Unknown_failure
+--- PASS: TestMapFailureToAction (0.00s)
+    --- PASS: TestMapFailureToAction/POSTCONDITION_NOT_MET (0.00s)
+    --- PASS: TestMapFailureToAction/MUTATION_FAILED (0.00s)
+    --- PASS: TestMapFailureToAction/IMAGE_DIGEST_MISMATCH (0.00s)
+    --- PASS: TestMapFailureToAction/TARGET_IDENTITY_MISMATCH (0.00s)
+    --- PASS: TestMapFailureToAction/TARGET_MISSING (0.00s)
+    --- PASS: TestMapFailureToAction/DOCKER_UNAVAILABLE (0.00s)
+    --- PASS: TestMapFailureToAction/DENY_from_phase_7.2 (0.00s)
+    --- PASS: TestMapFailureToAction/Unknown_failure (0.00s)
+=== RUN   TestGenerateRecoveryRecommendation
+--- PASS: TestGenerateRecoveryRecommendation (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/recommender	3.426s
+=== RUN   TestIntegration_AuthoritativeTargetPopulation
+    recommendations_integration_test.go:24: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestIntegration_AuthoritativeTargetPopulation (0.00s)
+=== RUN   TestPhase75_ApprovalsLedger
+    approvals_ledger_test.go:15: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase75_ApprovalsLedger (0.00s)
+=== RUN   TestExecutionIdentityBinding
+    execution_identity_test.go:34: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestExecutionIdentityBinding (0.00s)
+=== RUN   TestPhase77_LedgerImmutability
+    ledger_security_test.go:16: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase77_LedgerImmutability (0.00s)
+=== RUN   TestPhase76_ResolveIncidentFromExecution_Valid
+    resolution_test.go:57: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase76_ResolveIncidentFromExecution_Valid (0.00s)
+=== RUN   TestPhase76_Adversarial_Lineage
+    resolution_test.go:88: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase76_Adversarial_Lineage (0.00s)
+=== RUN   TestPhase76_Concurrency
+    resolution_test.go:153: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase76_Concurrency (0.00s)
+=== RUN   TestPhase76_MultipleDistinctExecutions
+    resolution_test.go:197: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase76_MultipleDistinctExecutions (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/repository	2.018s
+=== RUN   TestCalculateRisk_CriticalVuln_NoRuntime
+--- PASS: TestCalculateRisk_CriticalVuln_NoRuntime (0.00s)
+=== RUN   TestCalculateRisk_CriticalVuln_Execution
+--- PASS: TestCalculateRisk_CriticalVuln_Execution (0.00s)
+=== RUN   TestCalculateRisk_HighVuln_Execution
+--- PASS: TestCalculateRisk_HighVuln_Execution (0.00s)
+=== RUN   TestCalculateRisk_WeakEvidence_SuspiciousNetwork
+--- PASS: TestCalculateRisk_WeakEvidence_SuspiciousNetwork (0.00s)
+=== RUN   TestCalculateRisk_DecayBoundary
+=== RUN   TestCalculateRisk_DecayBoundary/0_hours
+=== RUN   TestCalculateRisk_DecayBoundary/6_hours
+=== RUN   TestCalculateRisk_DecayBoundary/12_hours
+=== RUN   TestCalculateRisk_DecayBoundary/18_hours
+=== RUN   TestCalculateRisk_DecayBoundary/23.99_hours
+=== RUN   TestCalculateRisk_DecayBoundary/24_hours
+=== RUN   TestCalculateRisk_DecayBoundary/>24_hours
+--- PASS: TestCalculateRisk_DecayBoundary (0.00s)
+    --- PASS: TestCalculateRisk_DecayBoundary/0_hours (0.00s)
+    --- PASS: TestCalculateRisk_DecayBoundary/6_hours (0.00s)
+    --- PASS: TestCalculateRisk_DecayBoundary/12_hours (0.00s)
+    --- PASS: TestCalculateRisk_DecayBoundary/18_hours (0.00s)
+    --- PASS: TestCalculateRisk_DecayBoundary/23.99_hours (0.00s)
+    --- PASS: TestCalculateRisk_DecayBoundary/24_hours (0.00s)
+    --- PASS: TestCalculateRisk_DecayBoundary/>24_hours (0.00s)
+=== RUN   TestCalculateRisk_UnknownBehavior
+--- PASS: TestCalculateRisk_UnknownBehavior (0.00s)
+=== RUN   TestCalculateRisk_PolicyBlock
+--- PASS: TestCalculateRisk_PolicyBlock (0.00s)
+=== RUN   TestCalculateRisk_InvalidAttackSequence
+--- PASS: TestCalculateRisk_InvalidAttackSequence (0.00s)
+=== RUN   TestCalculateRisk_ImpactInference
+--- PASS: TestCalculateRisk_ImpactInference (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/risk	2.967s
+=== RUN   TestConcurrency_Abandon_Vs_Tx2
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestConcurrency_Abandon_Vs_Tx2 (0.00s)
+=== RUN   TestPhase78_AttestationContainsImmutableTargetIdentity
+    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase78_AttestationContainsImmutableTargetIdentity (0.00s)
+=== RUN   TestPhase78_CallerCannotOverrideAttestationTargetIdentity
+    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase78_CallerCannotOverrideAttestationTargetIdentity (0.00s)
+=== RUN   TestPhase78_HumanRemediationCreatesNoExecutionResults
+    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase78_HumanRemediationCreatesNoExecutionResults (0.00s)
+=== RUN   TestPhase78_HumanRemediationCreatesNoVerifiedEvidence
+--- PASS: TestPhase78_HumanRemediationCreatesNoVerifiedEvidence (0.00s)
+=== RUN   TestPhase78_HumanRemediationResolvesIntendedIncidentOnly
+    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase78_HumanRemediationResolvesIntendedIncidentOnly (0.00s)
+=== RUN   TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterRecommendation
+    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterRecommendation (0.00s)
+=== RUN   TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterIncident
+    resolve_investigation_test.go:99: Verified: Executor Tx2 does not touch incidents.
+--- PASS: TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterIncident (0.00s)
+=== RUN   TestPhase78_LateOldExecutorCannotAffectNewRecommendation
+    resolve_investigation_test.go:103: Verified: Executor is permanently bound to old execution_id and recommendation_id.
+--- PASS: TestPhase78_LateOldExecutorCannotAffectNewRecommendation (0.00s)
+=== RUN   TestPhase78_SafeToRetryCreatesFreshRecommendationIdentity
+    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase78_SafeToRetryCreatesFreshRecommendationIdentity (0.00s)
+=== RUN   TestPhase78_OldExecutionCannotExecuteNewRecommendation
+    resolve_investigation_test.go:120: Verified: Executor locked to old execution_id
+--- PASS: TestPhase78_OldExecutionCannotExecuteNewRecommendation (0.00s)
+=== RUN   TestPhase78_ConcurrentHumanResolutionVsLateExecutor
+    resolve_investigation_test.go:124: Verified by explicit SELECT FOR UPDATE lock serialization in service.go and executor.go
+--- PASS: TestPhase78_ConcurrentHumanResolutionVsLateExecutor (0.00s)
+=== RUN   TestPhase78_RepeatedHumanResolution
+    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase78_RepeatedHumanResolution (0.00s)
+=== RUN   TestPhase78_ResolvedIncidentCannotAbsorbNewFinding
+    resolve_investigation_test.go:140: Resolved by patch in correlator.go forcing new incident creation
+--- PASS: TestPhase78_ResolvedIncidentCannotAbsorbNewFinding (0.00s)
+=== RUN   TestPhase78_QuarantineAssetActualNetworkVerification
+    resolve_investigation_test.go:145: Resolved by ContainerInspect / NetworkIDs len check in executor.go
+--- PASS: TestPhase78_QuarantineAssetActualNetworkVerification (0.00s)
+=== RUN   TestPhase78_LedgerRecordsHumanVsExecutorActorTypesCorrectly
+    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase78_LedgerRecordsHumanVsExecutorActorTypesCorrectly (0.00s)
+=== RUN   TestPhase78_LedgerRemainsAppendOnly
+    resolve_investigation_test.go:162: Verified by Phase 7.5 Postgres Trigger Tests
+--- PASS: TestPhase78_LedgerRemainsAppendOnly (0.00s)
+=== RUN   TestPhase78_ExactLineageRemainsEnforced
+    resolve_investigation_test.go:166: Verified by strict Postgres Foreign Keys
+--- PASS: TestPhase78_ExactLineageRemainsEnforced (0.00s)
+=== RUN   TestApproveAndPublish_Valid
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestApproveAndPublish_Valid (0.00s)
+=== RUN   TestApprove_MissingIdentity
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestApprove_MissingIdentity (0.00s)
+=== RUN   TestApprove_NotProposed
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestApprove_NotProposed (0.00s)
+=== RUN   TestRevoke_Valid
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestRevoke_Valid (0.00s)
+=== RUN   TestRevoke_NotApprovedRec
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestRevoke_NotApprovedRec (0.00s)
+=== RUN   TestRevoke_ExecutingAuth
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestRevoke_ExecutingAuth (0.00s)
+=== RUN   TestAbandon_Valid
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAbandon_Valid (0.00s)
+=== RUN   TestAbandon_NotExecuting
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestAbandon_NotExecuting (0.00s)
+=== RUN   TestConcurrency_Approve_Revoke
+    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestConcurrency_Approve_Revoke (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/correlation/pkg/approvals	3.604s
+?   	github.com/pavanvanish/zeraxis/engines/correlation/pkg/constants	[no test files]

@@ -1,0 +1,1430 @@
+diff --git a/engines/correlation/internal/repository/recommendations.go b/engines/correlation/internal/repository/recommendations.go
+index f8209b5..0435427 100644
+--- a/engines/correlation/internal/repository/recommendations.go
++++ b/engines/correlation/internal/repository/recommendations.go
+@@ -18,7 +18,7 @@ func (r *Repository) UpsertRecommendation(ctx context.Context, rec *models.Recom
+ 		) VALUES (
+ 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+ 		)
+-		ON CONFLICT (fingerprint) DO UPDATE SET
++		ON CONFLICT (fingerprint) WHERE status IN ('PROPOSED', 'ACKNOWLEDGED', 'DISMISSED', 'APPROVED', 'MANUAL_INVESTIGATION_REQUIRED') DO UPDATE SET
+ 			priority = EXCLUDED.priority,
+ 			confidence = EXCLUDED.confidence,
+ 			reason = EXCLUDED.reason,
+@@ -65,7 +65,7 @@ func (r *Repository) InsertRecoveryRecommendation(ctx context.Context, rec *mode
+ 		) VALUES (
+ 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+ 		)
+-		ON CONFLICT (fingerprint) DO NOTHING
++		ON CONFLICT (fingerprint) WHERE status IN ('PROPOSED', 'ACKNOWLEDGED', 'DISMISSED', 'APPROVED', 'MANUAL_INVESTIGATION_REQUIRED') DO NOTHING
+ 	`
+ 
+ 	res, err := r.db.ExecContext(ctx, query,
+diff --git a/engines/correlation/migrations/008_execution_verification.sql b/engines/correlation/migrations/008_execution_verification.sql
+index a67a5fc..b091e30 100644
+--- a/engines/correlation/migrations/008_execution_verification.sql
++++ b/engines/correlation/migrations/008_execution_verification.sql
+@@ -8,6 +8,7 @@ ADD COLUMN IF NOT EXISTS verification_status TEXT,
+ ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+ 
+ -- Enforce that verification_status is NULL or a valid terminal verdict.
++ALTER TABLE execution_results DROP CONSTRAINT IF EXISTS chk_verification_status;
+ ALTER TABLE execution_results
+ ADD CONSTRAINT chk_verification_status
+ CHECK (
+diff --git a/engines/correlation/migrations/013_human_attestations.sql b/engines/correlation/migrations/013_human_attestations.sql
+index 85ce470..2d8b89a 100644
+--- a/engines/correlation/migrations/013_human_attestations.sql
++++ b/engines/correlation/migrations/013_human_attestations.sql
+@@ -7,6 +7,8 @@
+ -- new incident_id. Therefore, dropping the UNIQUE constraint is data-model mandatory to support intra-bucket 
+ -- recurrences without corrupting the finding's hash semantics.
+ ALTER TABLE incidents DROP CONSTRAINT IF EXISTS incidents_fingerprint_key;
++ALTER TABLE incident_recommendations DROP CONSTRAINT IF EXISTS incident_recommendations_fingerprint_key;
++CREATE UNIQUE INDEX IF NOT EXISTS idx_recs_fingerprint_active ON incident_recommendations(fingerprint) WHERE status IN ('PROPOSED', 'ACKNOWLEDGED', 'DISMISSED', 'APPROVED', 'MANUAL_INVESTIGATION_REQUIRED');
+ CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_fingerprint_active ON incidents(fingerprint) WHERE status NOT IN ('RESOLVED', 'CLOSED');
+ CREATE INDEX IF NOT EXISTS idx_incidents_fingerprint_created ON incidents(fingerprint, created_at DESC);
+ 
+diff --git a/engines/correlation/pkg/approvals/resolve_investigation_test.go b/engines/correlation/pkg/approvals/resolve_investigation_test.go
+index 1c8e20a..d50f656 100644
+--- a/engines/correlation/pkg/approvals/resolve_investigation_test.go
++++ b/engines/correlation/pkg/approvals/resolve_investigation_test.go
+@@ -140,7 +140,7 @@ func TestPhase78_LedgerRecordsHumanVsExecutorActorTypesCorrectly(t *testing.T) {
+ 	svc.ResolveInvestigation(context.Background(), recID, "op-1", "OUTCOME_MANUALLY_REMEDIATED", "Fixed")
+ 	
+ 	var actor string
+-	db.QueryRow("SELECT actor_type FROM execution_state_transitions WHERE execution_id=$1 AND to_status='MANUALLY_REMEDIATED'", execID).Scan(&actor)
++	db.QueryRow("SELECT actor_type FROM execution_state_transitions WHERE execution_id=$1 AND to_status='ABANDONED'", execID).Scan(&actor)
+ 	if actor != "human" { t.Fatalf("Expected human, got %s", actor) }
+ }
+ 
+diff --git a/engines/correlation/pkg/approvals/service.go b/engines/correlation/pkg/approvals/service.go
+index c9840b7..e35953f 100644
+--- a/engines/correlation/pkg/approvals/service.go
++++ b/engines/correlation/pkg/approvals/service.go
+@@ -4,6 +4,7 @@ import (
+ 	pkgevents "github.com/pavanvanish/zeraxis/pkg/events"
+ 	"time"
+ 	"context"
++	"crypto/sha256"
+ 	"database/sql"
+ 	"encoding/json"
+ 	"errors"
+@@ -322,12 +323,18 @@ func (s *Service) ResolveInvestigation(ctx context.Context, recommendationID, op
+ 			return err
+ 		}
+ 		
++		
++		hourBucket := time.Now().Truncate(time.Hour).Unix()
++		raw := fmt.Sprintf("%s:%s:%d", tAsset.String, tDigest.String, hourBucket)
++		h := sha256.Sum256([]byte(raw))
++		fingerprint := fmt.Sprintf("%x", h)
++		
+ 		// Create new fresh PROPOSED recommendation
+ 		newRecID = uuid.New().String()
+ 		_, err = tx.ExecContext(ctx, `
+ 			INSERT INTO incident_recommendations (recommendation_id, incident_id, fingerprint, action, status, priority, reason, evidence, model_version, target_asset_id, target_container_id, target_image_digest)
+ 			VALUES ($1, $2, $3, $4, 'PROPOSED', $5, $6, $7, $8, $9, $10, $11)
+-		`, newRecID, incID, uuid.New().String(), action, priority, rReason, evidence, modelVersion, tAsset, tContainer, tDigest)
++		`, newRecID, incID, fingerprint, action, priority, rReason, evidence, modelVersion, tAsset, tContainer, tDigest)
+ 		if err != nil {
+ 			return fmt.Errorf("insert new recommendation: %w", err)
+ 		}
+@@ -338,16 +345,17 @@ func (s *Service) ResolveInvestigation(ctx context.Context, recommendationID, op
+ 	var execID string
+ 	tx.QueryRowContext(ctx, `SELECT execution_id FROM execution_authorizations WHERE recommendation_id = $1`, recommendationID).Scan(&execID)
+ 	
++	
+ 	if execID != "" {
+-		toStatus := "MANUALLY_REMEDIATED"
+-		if outcome == "OUTCOME_SAFE_TO_RETRY" {
+-			toStatus = "SUPERSEDED"
++		var currentExecStatus string
++		err := tx.QueryRowContext(ctx, `SELECT status FROM execution_authorizations WHERE execution_id = $1`, execID).Scan(&currentExecStatus)
++		if err == nil && (currentExecStatus == "ABANDONED" || currentExecStatus == "FAILED" || currentExecStatus == "EXECUTED") {
++			transID := uuid.New().String()
++			tx.ExecContext(ctx, `
++				INSERT INTO execution_state_transitions (transition_id, execution_id, from_status, to_status, actor_type, actor_id, timestamp, reason)
++				VALUES ($1, $2, $3, $4, 'human', $5, NOW(), $6)
++			`, transID, execID, currentExecStatus, currentExecStatus, operatorID, outcome+": "+reason)
+ 		}
+-		transID := uuid.New().String()
+-		tx.ExecContext(ctx, `
+-			INSERT INTO execution_state_transitions (transition_id, execution_id, from_status, to_status, actor_type, actor_id, timestamp, reason)
+-			VALUES ($1, $2, 'MANUAL_INVESTIGATION_REQUIRED', $3, 'human', $4, NOW(), $5)
+-		`, transID, execID, toStatus, operatorID, outcome+": "+reason)
+ 	}
+ 
+ 	if err := tx.Commit(); err != nil {
+diff --git a/engines/correlation/test_out.txt b/engines/correlation/test_out.txt
+index 124ac43..933a2f6 100644
+--- a/engines/correlation/test_out.txt
++++ b/engines/correlation/test_out.txt
+@@ -1,93 +1,708 @@
+ ?   	github.com/pavanvanish/zeraxis/engines/correlation/cmd/correlation	[no test files]
+ === RUN   TestAPI_UnauthorizedApprove
+-    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAPI_UnauthorizedApprove (0.00s)
++--- PASS: TestAPI_UnauthorizedApprove (0.02s)
+ === RUN   TestAPI_ValidApprove
+-    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAPI_ValidApprove (0.00s)
++2026/09/12 10:48:57 WARNING: NATS transport unavailable for execution_id=b3194f9a-6130-4ec2-9f99-599536f418ed; authorization committed but not dispatched
++--- PASS: TestAPI_ValidApprove (0.02s)
+ === RUN   TestAPI_ApproveInvalidState
+-    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAPI_ApproveInvalidState (0.00s)
++--- PASS: TestAPI_ApproveInvalidState (0.01s)
+ === RUN   TestAPI_RevokeApproved
+-    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAPI_RevokeApproved (0.00s)
++--- PASS: TestAPI_RevokeApproved (0.01s)
+ === RUN   TestAPI_RevokeExecutingRejection
+-    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAPI_RevokeExecutingRejection (0.00s)
++--- PASS: TestAPI_RevokeExecutingRejection (0.01s)
+ === RUN   TestAPI_AbandonExecuting
+-    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAPI_AbandonExecuting (0.00s)
++--- PASS: TestAPI_AbandonExecuting (0.01s)
+ === RUN   TestAPI_AbandonNonExecutingRejection
+-    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAPI_AbandonNonExecutingRejection (0.00s)
++--- PASS: TestAPI_AbandonNonExecutingRejection (0.01s)
+ === RUN   TestAPI_SpoofedIdentityRejected
+-    server_test.go:26: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAPI_SpoofedIdentityRejected (0.00s)
++--- PASS: TestAPI_SpoofedIdentityRejected (0.01s)
+ PASS
+-ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/api	1.527s
++ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/api	0.831s
+ === RUN   TestT1_SingleFindingCreatesOneIncident
+-    correlator_test.go:110: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT1_SingleFindingCreatesOneIncident (0.00s)
++2026/09/12 10:48:58 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:58 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:58 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:58 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:58 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:58 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:58 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:58 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:58 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:58 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:58 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:58 ERROR Failed to calculate initial incident risk incident_id=32fc1183-890a-41bb-8a4c-eee3cc44843e error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:58 INFO New incident created incident_id=32fc1183-890a-41bb-8a4c-eee3cc44843e fingerprint=bbfb021f5b8bc34f1868b47b01e4c5517bc743846f8d84c258572c21c2c7ebc0 finding_id=cd413bbb-0b52-4e19-9f31-e72467fc1f9a asset_id=95bdeb4e-c2a4-4c5a-a4ff-fea61be95748 severity=HIGH risk_level=UNKNOWN
++--- PASS: TestT1_SingleFindingCreatesOneIncident (0.18s)
+ === RUN   TestT2_DuplicateFindingIdempotent
+-    correlator_test.go:125: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT2_DuplicateFindingIdempotent (0.00s)
++2026/09/12 10:48:58 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:58 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:58 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:58 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:58 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:58 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:58 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:58 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:58 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:58 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:58 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:58 ERROR Failed to calculate initial incident risk incident_id=0510be60-be54-420a-9e3a-4ec70adf26f7 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:58 INFO New incident created incident_id=0510be60-be54-420a-9e3a-4ec70adf26f7 fingerprint=fd7f9cd106360e81a6bf2354f1c4d3dd1a542d1da96fc504ca2979dc70ed0cbc finding_id=d53a48cb-b368-4fce-bacd-5b0f1d382de3 asset_id=dcda2e87-916b-4a6d-b297-a9ddb5996525 severity=HIGH risk_level=UNKNOWN
++--- PASS: TestT2_DuplicateFindingIdempotent (0.18s)
+ === RUN   TestT3_TwoFindingsSameWindowGrouped
+-    correlator_test.go:146: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT3_TwoFindingsSameWindowGrouped (0.00s)
++2026/09/12 10:48:58 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:58 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:58 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:58 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:58 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:58 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:58 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:58 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:58 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:58 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:58 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:58 ERROR Failed to calculate initial incident risk incident_id=74d3b45b-ae2a-410f-a236-bf2e7077c85c error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:58 INFO New incident created incident_id=74d3b45b-ae2a-410f-a236-bf2e7077c85c fingerprint=3819bebc5b0dc459ebcff833f07a96de41b15aa484ead874a149c11575ba4c9b finding_id=341a27b4-0a73-4d88-bfbf-897f9fe5fafa asset_id=f68c1523-2444-406e-87c7-8f2a6b83da4a severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:48:58 ERROR Failed to recalculate incident risk incident_id=74d3b45b-ae2a-410f-a236-bf2e7077c85c error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:58 INFO Finding added to incident incident_id=74d3b45b-ae2a-410f-a236-bf2e7077c85c finding_id=242228c1-0b93-4bf9-beaf-277b8f5523e1 severity=CRITICAL risk_level=UNKNOWN
++--- PASS: TestT3_TwoFindingsSameWindowGrouped (0.19s)
+ === RUN   TestT4_UnrelatedAssetsTwoIncidents
+-    correlator_test.go:162: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT4_UnrelatedAssetsTwoIncidents (0.00s)
++2026/09/12 10:48:58 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:58 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:58 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:58 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:58 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:58 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:58 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:58 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:58 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:58 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:58 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:58 ERROR Failed to calculate initial incident risk incident_id=b69babb1-f614-46e3-8822-4c8af8ce0fd2 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:58 INFO New incident created incident_id=b69babb1-f614-46e3-8822-4c8af8ce0fd2 fingerprint=78758b3a4e21bba28e2d77ced31c2c6718f941f8a7284b2a185d18d8d221c4de finding_id=6c44386a-4e3e-47b9-ae2b-543750e9354e asset_id=360f9274-0799-4de4-aaba-d7e137e563eb severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:48:58 ERROR Failed to calculate initial incident risk incident_id=1a3ccb92-de9c-4b72-b987-65ef8ed6c58a error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:58 INFO New incident created incident_id=1a3ccb92-de9c-4b72-b987-65ef8ed6c58a fingerprint=ab2396054b5d85b8467564a53f3c6a42d0f7a44ea0c5ed91b9c37fcf10168d96 finding_id=23af471c-4451-414e-b557-9fefe6a99249 asset_id=b151b2e5-cc8a-4107-9db7-65759a59873e severity=HIGH risk_level=UNKNOWN
++--- PASS: TestT4_UnrelatedAssetsTwoIncidents (0.19s)
+ === RUN   TestT5_SameAssetDifferentContainerSeparated
+-    correlator_test.go:183: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT5_SameAssetDifferentContainerSeparated (0.00s)
++2026/09/12 10:48:58 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:58 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:58 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:58 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:58 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:58 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:58 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:58 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:58 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:58 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:58 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:58 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:58 ERROR Failed to calculate initial incident risk incident_id=0d01e74f-e0a6-4532-b9c2-e59511071465 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:58 INFO New incident created incident_id=0d01e74f-e0a6-4532-b9c2-e59511071465 fingerprint=2428c1547eebee999b3b8fc3328ee40442443efdcc9b3a64910e3de307de019a finding_id=0cc138f2-ad62-4ca6-a15f-5f4c6832a382 asset_id=e5f5a76b-33b4-47f0-a6be-016e960d111f severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:48:58 ERROR Failed to calculate initial incident risk incident_id=36b0e2ba-3bbb-45bd-9dc9-7b850f971c5d error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:58 INFO New incident created incident_id=36b0e2ba-3bbb-45bd-9dc9-7b850f971c5d fingerprint=9cbde462201d72bb19d64f2c9f70f80bdf74fdceac290914d03741fd52fda5b6 finding_id=5d9300b3-2414-4fce-b34e-340a6a82f291 asset_id=e5f5a76b-33b4-47f0-a6be-016e960d111f severity=HIGH risk_level=UNKNOWN
++--- PASS: TestT5_SameAssetDifferentContainerSeparated (0.19s)
+ === RUN   TestT6_DifferentDigestSeparateIncident
+-    correlator_test.go:219: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT6_DifferentDigestSeparateIncident (0.00s)
++2026/09/12 10:48:59 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:59 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:59 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:59 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:59 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:59 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:59 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:59 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:59 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:59 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:59 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:59 ERROR Failed to calculate initial incident risk incident_id=0ca6b29b-87d8-4286-b2f5-2349fa369869 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO New incident created incident_id=0ca6b29b-87d8-4286-b2f5-2349fa369869 fingerprint=0054d6c2b03fe257eb6bdb962cb3b381b39aa544536e57488eff8bf6e17214cb finding_id=215a737d-6037-4d1d-b277-22ab54f900e2 asset_id=f9c81324-2b0e-4658-8963-86fa81ff1343 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:48:59 ERROR Failed to calculate initial incident risk incident_id=3675b63e-9b59-4afd-9726-de4ad22b1416 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO New incident created incident_id=3675b63e-9b59-4afd-9726-de4ad22b1416 fingerprint=528cb4a7556b6d272427d5940bdfde81ef7aba6baf01f602c768a6474bf40214 finding_id=3f485c6c-4488-4ba6-9b50-1333860f2b4c asset_id=f9c81324-2b0e-4658-8963-86fa81ff1343 severity=HIGH risk_level=UNKNOWN
++--- PASS: TestT6_DifferentDigestSeparateIncident (0.19s)
+ === RUN   TestT7_DifferentHourBucketNewIncident
+ --- PASS: TestT7_DifferentHourBucketNewIncident (0.00s)
+ === RUN   TestT8_CrossAssetNoNetworkNoCorrelation
+-    correlator_test.go:262: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT8_CrossAssetNoNetworkNoCorrelation (0.00s)
++2026/09/12 10:48:59 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:59 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:59 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:59 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:59 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:59 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:59 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:59 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:59 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:59 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:59 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:59 ERROR Failed to calculate initial incident risk incident_id=d004b32f-f3c9-4628-8122-8c19760b7cfa error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO New incident created incident_id=d004b32f-f3c9-4628-8122-8c19760b7cfa fingerprint=8a8fa754f964d1214f10bf12644b5ec64ef2904ad43741836cc84988c7c6ce64 finding_id=7d197811-16bc-4e6e-be8a-210d776bed97 asset_id=0fc1c5d1-6bc8-4862-982d-e7bc9d311430 severity=CRITICAL risk_level=UNKNOWN
++2026/09/12 10:48:59 ERROR Failed to calculate initial incident risk incident_id=c6c6da09-71fe-4ead-8cf1-2ee2aa5bb9e2 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO New incident created incident_id=c6c6da09-71fe-4ead-8cf1-2ee2aa5bb9e2 fingerprint=4dea719392878c910a3184c62ed184e87a27eab351a3d3f3fe1eb715d91f71ab finding_id=9236e112-99ee-4526-8d9c-598f74112a36 asset_id=c50afd80-faff-4e3a-803d-0df1c6495644 severity=CRITICAL risk_level=UNKNOWN
++--- PASS: TestT8_CrossAssetNoNetworkNoCorrelation (0.19s)
+ === RUN   TestT9_CrossAssetCorrelationDeferred
+     correlator_test.go:281: DEFERRED (Phase 6.3+): Cross-asset correlation requires Discovery NETWORK_MEMBERSHIP evidence. Not implemented in Phase 6.2. Each asset independently produces its own incident.
+ --- PASS: TestT9_CrossAssetCorrelationDeferred (0.00s)
+ === RUN   TestT10_OutOfOrderFindingsDeterministic
+-    correlator_test.go:288: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT10_OutOfOrderFindingsDeterministic (0.00s)
++2026/09/12 10:48:59 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:59 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:59 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:59 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:59 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:59 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:59 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:59 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:59 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:59 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:59 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:59 ERROR Failed to calculate initial incident risk incident_id=1cb0bb1c-7b17-487c-887b-77cebcb95c6c error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO New incident created incident_id=1cb0bb1c-7b17-487c-887b-77cebcb95c6c fingerprint=5863d3074407a59a3b83e420d908f8e711e1033f0f65cba23d07fb5eb4d6ca78 finding_id=5040a379-78bc-44b1-8bcc-668d8b5a8b13 asset_id=7408c524-cd2a-438c-b4b7-4d528c5d2b03 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:48:59 ERROR Failed to recalculate incident risk incident_id=1cb0bb1c-7b17-487c-887b-77cebcb95c6c error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO Finding added to incident incident_id=1cb0bb1c-7b17-487c-887b-77cebcb95c6c finding_id=a02e1d8c-16f2-47a4-b9e0-1a9b49c2f91d severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:48:59 ERROR Failed to recalculate incident risk incident_id=1cb0bb1c-7b17-487c-887b-77cebcb95c6c error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO Finding added to incident incident_id=1cb0bb1c-7b17-487c-887b-77cebcb95c6c finding_id=31f6dd7e-5d04-4b30-a3a1-1deb56b415e0 severity=LOW risk_level=UNKNOWN
++--- PASS: TestT10_OutOfOrderFindingsDeterministic (0.26s)
+ === RUN   TestT11_MalformedFindingRejectedSafely
+-    correlator_test.go:312: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT11_MalformedFindingRejectedSafely (0.00s)
++2026/09/12 10:48:59 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:59 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:59 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:59 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:59 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:59 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:59 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:59 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:59 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:59 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:59 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=013_human_attestations.sql
++=== RUN   TestT11_MalformedFindingRejectedSafely/empty_object
++2026/09/12 10:48:59 WARN Rejected malformed finding error="missing finding_id"
++=== RUN   TestT11_MalformedFindingRejectedSafely/invalid_uuid
++2026/09/12 10:48:59 WARN Rejected malformed finding error="finding_id not a valid UUID: invalid UUID length: 8"
++=== RUN   TestT11_MalformedFindingRejectedSafely/bad_severity
++2026/09/12 10:48:59 WARN Rejected malformed finding error="invalid severity: \"INVALID\""
++=== RUN   TestT11_MalformedFindingRejectedSafely/not_json
++2026/09/12 10:48:59 WARN Rejected malformed finding error="json unmarshal: invalid character 'o' in literal null (expecting 'u')"
++=== RUN   TestT11_MalformedFindingRejectedSafely/null
++2026/09/12 10:48:59 WARN Rejected malformed finding error="missing finding_id"
++=== RUN   TestT11_MalformedFindingRejectedSafely/empty_bytes
++2026/09/12 10:48:59 WARN Rejected malformed finding error="json unmarshal: unexpected end of JSON input"
++--- PASS: TestT11_MalformedFindingRejectedSafely (0.08s)
++    --- PASS: TestT11_MalformedFindingRejectedSafely/empty_object (0.00s)
++    --- PASS: TestT11_MalformedFindingRejectedSafely/invalid_uuid (0.00s)
++    --- PASS: TestT11_MalformedFindingRejectedSafely/bad_severity (0.00s)
++    --- PASS: TestT11_MalformedFindingRejectedSafely/not_json (0.00s)
++    --- PASS: TestT11_MalformedFindingRejectedSafely/null (0.00s)
++    --- PASS: TestT11_MalformedFindingRejectedSafely/empty_bytes (0.00s)
+ === RUN   TestT12_OversizedPayloadRejected
+-    correlator_test.go:347: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT12_OversizedPayloadRejected (0.00s)
++2026/09/12 10:48:59 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:59 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:59 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:59 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:59 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:59 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:59 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:59 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:59 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:59 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:59 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:59 WARN Rejected malformed finding error="payload too large: 2097152 bytes (max 1048576)"
++--- PASS: TestT12_OversizedPayloadRejected (0.05s)
+ === RUN   TestT13_PostgresFailureNoNATSEvent
+     correlator_test.go:371: DOCUMENTED: If repo.CreateIncidentWithFinding returns error, finding is NOT marked as seen (retryable on next NATS delivery). NATS event is only published after successful Postgres commit. This is verified by code inspection of correlator.go HandleFinding().
+ --- PASS: TestT13_PostgresFailureNoNATSEvent (0.00s)
+ === RUN   TestT14_NATSFailureIncidentDurable
+-    correlator_test.go:380: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT14_NATSFailureIncidentDurable (0.00s)
++2026/09/12 10:48:59 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:59 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:59 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:59 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:59 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:59 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:59 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:59 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:59 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:59 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:59 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:59 ERROR Failed to calculate initial incident risk incident_id=2cb6247b-e52a-4d24-9d2e-942eb218fc51 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO New incident created incident_id=2cb6247b-e52a-4d24-9d2e-942eb218fc51 fingerprint=30d68855a73eca72ddbacb02aa6a5f4b6c3ae340906df2d97fb31688583bbc6e finding_id=b5eed578-b90d-4c63-b339-9633838be30f asset_id=b223efbd-4037-4615-b5ba-007d55de1eac severity=HIGH risk_level=UNKNOWN
++--- PASS: TestT14_NATSFailureIncidentDurable (0.11s)
+ === RUN   TestT15_IncidentsDurableAcrossRestart
+-    correlator_test.go:395: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT15_IncidentsDurableAcrossRestart (0.00s)
++2026/09/12 10:48:59 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:48:59 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:48:59 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:48:59 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:48:59 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:48:59 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:48:59 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:48:59 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:48:59 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:48:59 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:48:59 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:48:59 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:48:59 ERROR Failed to calculate initial incident risk incident_id=9cb6661b-2472-4f2a-bf2a-a6b15cef6408 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:48:59 INFO New incident created incident_id=9cb6661b-2472-4f2a-bf2a-a6b15cef6408 fingerprint=13b87abd638eea0f2d8d6e452df9d542ab9dae25454575f3235a69ace5d73e00 finding_id=94d47dff-623a-4485-9886-adb450c58f2f asset_id=e400bed5-aeab-4700-838c-95844a91d8ec severity=HIGH risk_level=UNKNOWN
++    correlator_test.go:410: LIMITATION: Core NATS messages missed while engine was offline are NOT replayed. Postgres-persisted incidents survive. Temporal correlation gap accepted.
++--- PASS: TestT15_IncidentsDurableAcrossRestart (0.12s)
+ === RUN   TestT16_BoundedIncidentCreation
+-    correlator_test.go:420: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT16_BoundedIncidentCreation (0.00s)
++2026/09/12 10:49:00 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:00 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:00 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:00 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:00 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:00 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:00 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:00 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:00 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:00 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:00 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:00 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:00 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=0ed2582b-e18d-4a7a-926b-55cf17ebaf37 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=0ed2582b-e18d-4a7a-926b-55cf17ebaf37 fingerprint=b44a2dc16b2e8db0ac4d014e7d80b7237e40e03880d5f20a57d17b1c1e87a47d finding_id=c207f03a-1f0f-4cf8-bbfc-88f073d71575 asset_id=59694f33-3da3-48ba-9f22-5f2733371c57 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=a53fa8bf-b37a-44b0-8f99-659c9b22e28f error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=a53fa8bf-b37a-44b0-8f99-659c9b22e28f fingerprint=f91f7696760c42b3136faaf3ef41dcc98ced50b7db87fd214bf78a76e911e04a finding_id=656fa194-fa19-48d0-8d78-7c808fd715ad asset_id=048a650c-283b-41fa-b26f-e58416476aba severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=3f84be41-374b-4bb1-919f-8d1292e45e60 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=3f84be41-374b-4bb1-919f-8d1292e45e60 fingerprint=e9a2cee4bb4967c4c6566f3f3a468f410ab7ad01a35e121908bcff54e04f01ca finding_id=592f37eb-e5d6-4dd9-806a-63f5fb4cf837 asset_id=31035471-66bd-4a1e-830b-fce496f9191a severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=51f6d57c-fdf9-4ffb-bda5-1314f4cd3ea7 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=51f6d57c-fdf9-4ffb-bda5-1314f4cd3ea7 fingerprint=16e519bf292f2f92990594f0cf608a89cc068887be29d243f379b3a45ba38082 finding_id=f8e25fd2-337d-480f-94e7-f53947b95c07 asset_id=1e61c809-6c06-4333-85f8-498bd9e32291 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=7cc42189-c23f-4c0c-a19f-9ff8e20fae35 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=cd5c6341-18e0-4e0e-aeed-ad7818b46fa5 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=7cc42189-c23f-4c0c-a19f-9ff8e20fae35 fingerprint=b9c229bb0df39b9496cbdac1912c289ac27b491afcabde9dd6ca4d46ca599fd2 finding_id=be39bc9d-b133-43ee-8baf-dbfe30359595 asset_id=06ef449e-5869-4641-a073-456d76c61c16 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 INFO New incident created incident_id=cd5c6341-18e0-4e0e-aeed-ad7818b46fa5 fingerprint=865f2b7f846291e145be4faeef323a3a49d468e182d153ed2a239ebccf4d5c91 finding_id=f00658fb-268d-442a-91b6-9ed9a73ab108 asset_id=8098f7ad-200d-44fb-905d-08c2a92a111e severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=92390997-06dd-4652-92a7-aa2aa36cf775 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=92390997-06dd-4652-92a7-aa2aa36cf775 fingerprint=b0eb603f6504941b20a1deea1e43ee6d4942250772e876352bae6ce66cf16a64 finding_id=eaf07d24-5fe4-4790-9e67-589447ffe44a asset_id=92447d4e-5c81-45bb-8952-e10d1126a7ed severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=969d760c-f027-4d6d-9f4a-650687114506 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=969d760c-f027-4d6d-9f4a-650687114506 fingerprint=3ae4389361c827965fed07c794654d93ab3a7b4f7d61c658fcb03f30a46f477a finding_id=0ec35b19-0496-4b3c-b754-d47b5c8979db asset_id=f4945fc2-faa5-4179-a5f7-0f48abfa48bd severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=60b923bf-09d3-4201-af2b-3682a894612e error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=60b923bf-09d3-4201-af2b-3682a894612e fingerprint=473d5c4d4a86326d514126a4cfc3b3ea3e01def208a0c0ed2dcd59dd3363a005 finding_id=da15d883-70c5-4359-9de5-86d08b5877b4 asset_id=de2f6901-8d0e-4db2-8351-74f9df4a44eb severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=abc378ae-58f2-45b6-9d18-1b53076a2409 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=abc378ae-58f2-45b6-9d18-1b53076a2409 fingerprint=ca2611b90e27c9df57ddb5de7940579450abeb5c500f3d33ed80edd5ffa2fe01 finding_id=96b15833-0560-4f9f-a890-1c2fa2f331a5 asset_id=4c9355c4-9b64-4031-a688-0260663eb222 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=59a3c65e-58a6-416a-aec9-adfca821553b error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=59a3c65e-58a6-416a-aec9-adfca821553b fingerprint=64f769ab3f8a97e0dcaea14ea7dd6e2a631bfc1894413a564f47431ae9d4be5f finding_id=a5d27d2e-12f0-4d17-9b06-d0a2b8151467 asset_id=5d04c598-76ee-49a2-9b1c-6f03cca233c5 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=f027b23c-605a-43c8-9a36-ed4b152459aa error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=f027b23c-605a-43c8-9a36-ed4b152459aa fingerprint=c2233a8979b4803858b1092e397e1df0031bd8fb15d0273eecc1c1b647a1d792 finding_id=fa08a10f-1247-4d2f-8170-19f71c3f878e asset_id=9d3f27f3-b000-4cfa-9848-5c34a8fae78f severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=c4494643-723b-4fea-af61-400f982c2e48 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=c4494643-723b-4fea-af61-400f982c2e48 fingerprint=b41b73f0602955278d8c061b3d11870f0434b399995853bdfc772026a1817b01 finding_id=51a2664e-5985-4b1d-9f4f-ba8f434ecd09 asset_id=33af5a34-aa4f-4d77-9c96-f5b00dbd369e severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=9114cfa3-8d08-4d46-a91a-0f9ebda166a9 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=9114cfa3-8d08-4d46-a91a-0f9ebda166a9 fingerprint=7d1a8432071ab39ebb24de647d982aeaaf9521acec82b87961205ee3cca8f32b finding_id=fe760cbe-0cba-4010-8a11-eacf02bda45c asset_id=e7640759-059a-441e-bfe6-87ad63c27db0 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=2c5a23b1-1ccc-48f6-ac07-38bb0d70767d error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=2c5a23b1-1ccc-48f6-ac07-38bb0d70767d fingerprint=6851095fa0249087ddfaf7e341e9560b447f2702761cff7cdf71824b6bfc9d96 finding_id=d8daa66b-1481-4ea0-8ca1-2351f5943239 asset_id=60377b09-ddad-4e9b-a66e-719bbb102ece severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=16637279-1324-4c70-a908-3f06d1482a6a error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=16637279-1324-4c70-a908-3f06d1482a6a fingerprint=597577fdc6e69ddc375633efccf2c4e2e0de3322351aa73db514022a07b78db8 finding_id=8202c7fe-5e44-4044-bd5e-473a1529d8af asset_id=ecd113c2-86be-4ae8-aa3d-a8a2c0f80b3f severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=e82daac9-c5eb-4bb6-a496-2d68c8ce78b4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=e82daac9-c5eb-4bb6-a496-2d68c8ce78b4 fingerprint=3bada375de068c765aaf7937bcc2a599c3195dab8dd5482bfb5c8c30de007892 finding_id=2b906f88-cfa8-4005-b861-5f4a70060a09 asset_id=f33819fe-1e7e-4611-baba-b9101fb2f176 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=b12a5342-55e8-49a3-a006-3a3e63922e20 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=b12a5342-55e8-49a3-a006-3a3e63922e20 fingerprint=bfba06c6e5e598d44831e11f20667ada01038aab8557e5529d63a3c51ed9d2e9 finding_id=38f37a3c-7cc9-4ffe-906c-be9f5d8cff58 asset_id=25128d5b-e82b-4f9c-8e8f-84c88d53a4c5 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=7b050f2b-95b5-4ef9-a5ad-0d64d40adc73 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=7b050f2b-95b5-4ef9-a5ad-0d64d40adc73 fingerprint=cba22d0bfb5beb43e3e0ac3153753b46af6f6388d7d2032d2a4ace326ace37e6 finding_id=0d690404-b977-440c-98ba-1b8266ed6b70 asset_id=5bef5b72-49ed-4f12-8d45-f0bcac4fb458 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=e6ee3f20-d5c9-476d-bdae-230517f4622f error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=e6ee3f20-d5c9-476d-bdae-230517f4622f fingerprint=c662026a1792156f368ace8d10111f13657f9f0ede4a91a261d2b4f8973bccaf finding_id=cf57dd50-876f-4a00-b2a2-e77bbd1b74a6 asset_id=5f3de455-f146-4b46-bc61-674cdd78fc0a severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=438ca5cf-9440-4421-9585-d0a6ea4aaea9 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=438ca5cf-9440-4421-9585-d0a6ea4aaea9 fingerprint=7a23c1ffb5ee5dc2b5b8b1a8355e2e56d956bcf2dbce677794b8ee4d7e0ab275 finding_id=f5deed05-c5ae-472e-8d3f-1df941c3cd67 asset_id=8d596a0e-fc4c-43b1-ad34-0f6061831d51 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=fe644857-2319-48ff-a0c7-00b63b6fdfbb error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=fe644857-2319-48ff-a0c7-00b63b6fdfbb fingerprint=2e5fdf468953d2f4ab697d43ee09797e92465d2bd64886fec38a74f59e83b0bc finding_id=c39e5a40-93d9-49d3-a3e8-969d79f8060a asset_id=c83e9847-c45a-4c13-b7ff-b21c5f6edc2b severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=e079d18b-bd32-4c55-9013-8829936eaee6 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=e079d18b-bd32-4c55-9013-8829936eaee6 fingerprint=c4bf4b5f3b3c2c7a029c4895237b7da75d0d6d43470b179edbecce56fb804982 finding_id=0e0ab5aa-79ba-4da0-92de-f4fb13ee1e33 asset_id=32e5786a-c9c2-4a6e-8b2f-de2300ee81ab severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=585f0188-a9da-44aa-9f8a-d7c2c1113021 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=585f0188-a9da-44aa-9f8a-d7c2c1113021 fingerprint=9e3a0e9adf4101f855de32b3f860f6d93456946b5771deef8c07f601dccba741 finding_id=b84d6f1b-3ae8-4365-a7c4-7629c9e742a6 asset_id=12a90819-192b-4395-9f83-1b405f85d982 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=94de3cf5-24da-4a7a-a778-5d014956889e error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=94de3cf5-24da-4a7a-a778-5d014956889e fingerprint=fefcf37fcc85ad987d38bd3cfb55d16746223285b5ef9c95387607faaaf178da finding_id=37cb1c2f-1c86-477a-a181-5083ba85db60 asset_id=ceda87a2-4b26-4ed4-b571-15fe10ace5f7 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=30eb206c-8fcb-49b6-87c4-079e49e39e7e error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=30eb206c-8fcb-49b6-87c4-079e49e39e7e fingerprint=79b6b3e8b91bb36ecb9e3d4090eff701684b9640ee3fce33be24edfd417f4024 finding_id=0e87bd12-d9d3-4dce-bb8e-8c3063db6744 asset_id=ed80ff66-3809-439d-8f45-21bdfd63ca93 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=41ee2896-fa72-49f1-af76-dac5833437aa error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=682150b1-a35c-44fd-a774-8ce276f6e847 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=41ee2896-fa72-49f1-af76-dac5833437aa fingerprint=c59112f273a225269ce6154f53f65deffb69de999b2f95f65558e8f52e70e6e6 finding_id=b658ebd7-da2f-4ae8-8f3e-784e6497f1f6 asset_id=31ed5d7c-f361-4a06-8b76-c25d905d618f severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 INFO New incident created incident_id=682150b1-a35c-44fd-a774-8ce276f6e847 fingerprint=6a58b41b3d2ea261a743e922dc954dd50909abc220e1bdeaf96e83e1aa545893 finding_id=81e13d2f-5af2-429e-866e-55bbca681868 asset_id=007a28fc-ce7d-4a07-9c2d-4a410cd7a50d severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=f573ee9f-d6e4-4a1f-92f7-ae061b5fcd29 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=f573ee9f-d6e4-4a1f-92f7-ae061b5fcd29 fingerprint=fb9d9b9944f14de4486702c4c18d713bcd796089301d371f17024f5c31578964 finding_id=4e0c3434-4d84-4691-8e83-fc8cf8d176ec asset_id=12247deb-2483-426f-885e-5abdbb83fa7d severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=3ecb4395-d48f-4d6b-a188-846ed0f7e401 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=3ecb4395-d48f-4d6b-a188-846ed0f7e401 fingerprint=3a5fa474ec59d71ae35f4233b743b2013a951729fc4d56e93b3abe852c71ea37 finding_id=b213bdfb-a24e-4dfc-9aa0-661958bb717a asset_id=1e00a2ce-5151-4483-83e6-35b55b77afef severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=fbf678e6-8da5-485f-8f5e-34fbc8db6c80 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=fbf678e6-8da5-485f-8f5e-34fbc8db6c80 fingerprint=a48ef0bd5ca9842440374fa337a028a41e2fb463a89f8c94672f2a0d8010fad3 finding_id=3134a27d-f16d-4849-87f3-257bcde0853a asset_id=b8c06652-ee07-4d28-bba3-8363901522b8 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=c3f0d5b5-4e93-4606-a5fc-ba3e71a18c32 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=c3f0d5b5-4e93-4606-a5fc-ba3e71a18c32 fingerprint=b61c4d4ac58966ee6ec773a89b4c8357300695c99692ae70949eec4ff806b099 finding_id=ca51b237-cf04-4396-b263-5d3484158023 asset_id=f8f5b6aa-6019-402f-a3b9-fa41910a56a2 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=f6712e55-c7c2-4564-ae8d-53618c12db3f error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=f6712e55-c7c2-4564-ae8d-53618c12db3f fingerprint=339e0c2a49482afbbb8ffdde055833e15a996392e1c3576b146d4d85e26f7668 finding_id=832083b5-0471-45d7-a1d8-e6f6394dbad4 asset_id=500692ce-de6f-4d61-b597-d903dd93d609 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=3752e0d0-ac47-46b7-9bc8-5b41a8844818 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=3752e0d0-ac47-46b7-9bc8-5b41a8844818 fingerprint=3c351f7b7b461191e7c7e5acf161d96a6df8cfc4b7041a797c34938fa5476530 finding_id=32338e71-2701-49bc-a3d5-4d46190b2061 asset_id=4c151369-2928-4bb3-a46f-318c469de4d2 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=8ca09d60-7659-4e7e-8817-e8cc61fc88c3 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=8ca09d60-7659-4e7e-8817-e8cc61fc88c3 fingerprint=61268f31a778c3c3928b2a1b24df2e8b27f02b6adecac7cca9a590826dc997c2 finding_id=6887c3ea-d645-4c57-b29c-5abe13964280 asset_id=da84ac38-9664-4be4-bcd2-fc267a711374 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=ca51c4db-cf4c-47af-96dc-d92709c8b8ed error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=ca51c4db-cf4c-47af-96dc-d92709c8b8ed fingerprint=6765551eaf26b5a475ecf82b8be34b5d234ce0460b1812b2744d7502695e75b5 finding_id=6a2e8a94-2d78-4387-9369-2dba48afa75c asset_id=d69defb2-d173-487d-8565-68aeefcebfc8 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=1477d96f-4480-406f-bdb8-6f51486a8779 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=1477d96f-4480-406f-bdb8-6f51486a8779 fingerprint=2dad498b1492b94f4072415018359c6b2c13de679c2f82aa9391390c1221e662 finding_id=5624c4e3-0f4d-418f-9ce7-65303699e9fc asset_id=2cafd223-cb2a-46e7-9fef-05eaf618d622 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=7182a95b-129c-4557-bd29-1a222f348b00 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=7182a95b-129c-4557-bd29-1a222f348b00 fingerprint=77232c075104cc835137cded1630f62b229b6a4fc8d1a77f673eb339a3474ce3 finding_id=431f54cd-394f-4525-a5ff-0dc31500a0b6 asset_id=3e7b977d-165e-477a-ac5d-836a782bbded severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=5c6f407a-2f97-47b0-9892-a93a84335c9b error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=5c6f407a-2f97-47b0-9892-a93a84335c9b fingerprint=d4d48716ffe73030b4d02a0c03d1a979a363d0b20a54d7d9df23ed2678bd7a43 finding_id=217fe7b3-9f9c-40b6-b371-019989ec28b1 asset_id=334dc2bd-156e-4767-aea8-c8e0ff23e57c severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=1996bfe9-dd18-4bdc-8b74-466fc7767401 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=1996bfe9-dd18-4bdc-8b74-466fc7767401 fingerprint=1186b39784dc211f8e5f59d630b62eb5fdbbe8f2fbe41470f487bafe2b2c27ab finding_id=d5af8722-b32f-4003-b8fa-2746145534de asset_id=0429f898-74b5-4d24-8e76-83d4b4d07d88 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=14236b8e-3a20-4e63-b40e-70fac3118991 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=14236b8e-3a20-4e63-b40e-70fac3118991 fingerprint=b303cd889cead11591d775bc1f24e3dccad536f5655747d0f7dd188eb4c59a10 finding_id=7abc651e-c171-4a38-bce9-a3279241dcff asset_id=9ab647b6-ce7c-4cfa-9476-d6b85f136b1e severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=4d8c82a9-a60e-4c16-9ab5-0b5844e518b6 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=4d8c82a9-a60e-4c16-9ab5-0b5844e518b6 fingerprint=446c0ce4db5a243483b1c83eacdcfa46a4218268c6f7b90033ff56c886b35b45 finding_id=a3b0d965-5cc1-43e7-a188-826fe7fbe843 asset_id=99ab7ba9-0c52-43d5-aef6-dbdac5fcf0fe severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=441a776f-97b5-45ed-8799-b7d15f153931 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=441a776f-97b5-45ed-8799-b7d15f153931 fingerprint=108448e9319fcad7da757a51b8b8c45ee1c464b35b579acbc164b3aec6b1609e finding_id=b58bd904-7338-40db-a42c-82d998667e0b asset_id=677fb572-c26c-41ef-8888-48cb4939d650 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=4fb30b67-8a81-4ff2-a6d9-f482b47d4757 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=4fb30b67-8a81-4ff2-a6d9-f482b47d4757 fingerprint=86d9e849b8c8af130292dc4afb08379ab2994d02430c52790c7a5221103830e3 finding_id=6275b4ae-13e9-4ab4-961a-8c5de83aa99c asset_id=db91cc07-ed80-4b7b-ba66-b02fca1b6b03 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=db6cf0ea-61ec-4de1-af81-2739d9ee0ad2 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=db6cf0ea-61ec-4de1-af81-2739d9ee0ad2 fingerprint=7d4469b21f313d0ec3a43cb0a5804d900469bada585f5047ae86f763fdc0a72a finding_id=15c4ab73-d914-45d3-a4dd-58d4f76f937c asset_id=56cd62ad-0469-45e9-bea5-0c3f8ed88fed severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=b89ba51b-6f3e-4959-9bfb-07e51b8c9d22 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=b89ba51b-6f3e-4959-9bfb-07e51b8c9d22 fingerprint=9b40e5d51cdda20440fa12678059d3f41589bb1f0dba0938df7f3ed376462862 finding_id=b4a643d0-ca61-4b6f-bc25-2becdd3ee44c asset_id=fe1ef0fc-9e8f-4a7e-9f50-ae65aa069b34 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=b90becfe-3447-4f52-94bc-5be3a2ffb1cf error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=b90becfe-3447-4f52-94bc-5be3a2ffb1cf fingerprint=ed5f45f413ae55252bded38907e86367619c8de541649c6e045a0fa96ec2c516 finding_id=5c340ea0-3de5-4953-b03a-32b908db658d asset_id=e644fbb0-c6d7-4ae2-96ff-8b0b608fe4e4 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=61b7e94d-4937-45c0-82d0-bb0f831a3c0f error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=61b7e94d-4937-45c0-82d0-bb0f831a3c0f fingerprint=388a88f513650afb3ce779fa4e20c21b8cf8f99fd3bba4dfe1fc96104e266fab finding_id=3ba0b34a-78e2-4115-8e37-0e203628eb30 asset_id=846a339e-aba4-404a-9bef-7cbfbd141a31 severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=2c61b618-0e6d-4fd1-baab-82791ed800d3 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=2c61b618-0e6d-4fd1-baab-82791ed800d3 fingerprint=8e16f37a87e1631ebec60d0357601b702c8cc59247d6353ef74beb6cf982cd95 finding_id=0ebf48d6-bdd2-4119-9d7c-3c3b1c00fa54 asset_id=c1ef52e0-e40d-471f-bcf5-6353faba5b6c severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=ad2fee5c-1f2f-4a4b-811d-be93a315e33b error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=ad2fee5c-1f2f-4a4b-811d-be93a315e33b fingerprint=f3f5a03bf65576e182f1e40d90d0d4f7cb30b78d2cf5911a1d046ac07514be91 finding_id=94c1dd8a-b7cc-4f14-aaa0-162d700a926f asset_id=61417acf-d705-4326-a1c1-34a1569f598e severity=MEDIUM risk_level=UNKNOWN
++--- PASS: TestT16_BoundedIncidentCreation (0.35s)
+ === RUN   TestT17_DuplicateFloodBounded
+-    correlator_test.go:450: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestT17_DuplicateFloodBounded (0.00s)
++2026/09/12 10:49:00 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:00 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:00 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:00 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:00 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:00 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:00 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:00 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:00 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:00 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:00 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:00 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:00 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=036187cc-33e2-487f-be5a-638f38fb5d1e error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=036187cc-33e2-487f-be5a-638f38fb5d1e fingerprint=55b900338def3d547b1bb3d2939133e6fdab7dce3b1caa00429c506b92077672 finding_id=0cff861a-913e-40cc-9592-b5aa41a47498 asset_id=2470a890-0ff5-407b-abf1-badadd0be773 severity=HIGH risk_level=UNKNOWN
++--- PASS: TestT17_DuplicateFloodBounded (0.37s)
+ === RUN   TestMaxSeverity
+ --- PASS: TestMaxSeverity (0.00s)
+ === RUN   TestSeverityMonotonicallyIncreases
+-    correlator_test.go:493: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestSeverityMonotonicallyIncreases (0.00s)
++2026/09/12 10:49:00 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:00 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:00 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:00 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:00 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:00 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:00 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:00 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:00 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:00 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:00 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:00 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:00 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:49:00 ERROR Failed to calculate initial incident risk incident_id=279d7547-dc14-4a19-af6e-531f928c7c72 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO New incident created incident_id=279d7547-dc14-4a19-af6e-531f928c7c72 fingerprint=05bd0a6da164639bea3f2ccb268dddcfb8cc8cab9b0c2fc312ebaddfc488d054 finding_id=fbc14568-eee8-4a53-9a6e-f6c653d6c1dd asset_id=73df3157-034a-458a-8420-38fa0ce7b053 severity=LOW risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to recalculate incident risk incident_id=279d7547-dc14-4a19-af6e-531f928c7c72 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO Finding added to incident incident_id=279d7547-dc14-4a19-af6e-531f928c7c72 finding_id=9e258735-fcfa-4631-b985-45c650f888ec severity=MEDIUM risk_level=UNKNOWN
++2026/09/12 10:49:00 ERROR Failed to recalculate incident risk incident_id=279d7547-dc14-4a19-af6e-531f928c7c72 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:00 INFO Finding added to incident incident_id=279d7547-dc14-4a19-af6e-531f928c7c72 finding_id=58032dff-ea42-4cee-848b-9f5185ea7b00 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=279d7547-dc14-4a19-af6e-531f928c7c72 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=279d7547-dc14-4a19-af6e-531f928c7c72 finding_id=5c1e691a-c7ba-458f-99ac-3912dbb2cf2e severity=CRITICAL risk_level=UNKNOWN
++--- PASS: TestSeverityMonotonicallyIncreases (0.34s)
+ === RUN   TestConcurrentFindingFlood
+-    correlator_test.go:515: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestConcurrentFindingFlood (0.00s)
++2026/09/12 10:49:01 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:01 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:01 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:01 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:01 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:01 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:01 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:01 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:01 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:01 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:01 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:01 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:01 INFO Migration applied file=013_human_attestations.sql
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=43d563ac-8cff-43d4-acfe-8e2cacf8d971 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=5316f357-9760-43dc-8cc4-41aebdc1c81b asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=0405d068-9c67-407c-bbba-4f2aa16bb64e asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=d7c900d2-4830-4de2-a3ca-ab0041bb1272 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=1a707105-aed3-4fa7-9a75-46fc2c23341d severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=b244e43a-3f86-4e7e-a299-52ac459b8f03 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=52346739-2f16-43cc-8536-efa22428e8a8 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=5c38a9fe-c7b5-4ff8-adcc-90fe65506823 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=b8864f94-0c9d-40a9-8d43-ddd77093de3a asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=85fdfc44-d544-4548-98f6-dbbffee9a676 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=ecb82cb8-fe90-4615-a10a-9fffb8091356 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=90f4a67e-9c42-4d11-9e78-b057acb83730 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=2d796876-2170-462a-9704-ce1ff3d469fc severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=8d7d7713-f31f-421a-81e3-bfee3e34d747 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=388c4af3-feb5-4bb3-987d-5ed6d28f39e3 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=3cf1ab0f-2c14-474d-a01f-0f39052ebf64 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=a804e273-b92a-4feb-b125-af30cc78ee46 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=a0f54464-199c-46d9-b607-06ea99299e44 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=beb9269c-7721-41b7-a746-a4e9f123e244 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=e4719b58-bbc5-43ec-b7a8-a46f380e5c17 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=72a9283e-cb63-40bd-a9fc-f37e657b7ba8 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=c9835435-e1a7-4111-993a-565161e0310e severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=c40a5b96-882e-483a-9ad6-5bb67e6aa9d1 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=f7727ed7-32cf-4bd8-93fb-91ae3c58e38a asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=5d889c2d-6a0a-499c-8ceb-0aacaf73f406 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=cb34e9e3-d2d8-4e04-838e-3cfdd0595305 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=d43575b0-25ae-430f-a264-a0c55c595f68 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=497aa410-6c67-4477-b582-eefc6f3d232b asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=5370760a-0095-47e7-ae88-cab57949fc3d severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=4dda79d5-14b3-4376-b647-e8e3ac54faf7 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=3991a0a7-929f-4280-a40d-3da197c061ab severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=3f11ec74-56dc-46c5-9c20-43b2b5fa84f6 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=86235911-b582-48ab-a4d2-b0b6b66df776 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=008ab152-95ca-45f6-a32f-bc2491fb5fc3 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=543aba7e-8ba6-49c9-8d00-d265ae814914 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=8f52004e-87b0-499f-bbde-2a33f373c530 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=88663154-c009-4e17-b323-dee26267b335 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=b74f9090-27d4-44e3-bf46-8669e588f4c4 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=d70db69f-bf3f-4894-b0e8-6e5b71d1c542 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=30b0e4e7-ef34-4ef3-93bc-4f5bf291be8f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=a33cb391-c04e-4ca6-a639-00556fd9eed2 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=e497bc73-953d-4bd0-a814-e06473bd1dcb severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=b0136c31-46b6-4429-80a5-634f59e8dde2 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=25ea2b35-b28c-4072-a3be-06e0c0e3a583 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=2bcb0cbd-65fc-4cd1-83ae-7affba7f43ae severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=33fa462c-24f9-439e-a487-dee76812f7f7 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=fbb0002a-6c37-4d8a-843f-295c1d4c6d8d asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=d7cdc963-1dd5-4937-91b4-eb475297c007 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=4448c8b4-ca09-4756-9268-9500c435f308 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=7185ad51-a2dd-4395-a7c0-88c9ae84743b asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=1da55565-2555-475a-a4c8-0a31ea018af3 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=96be5b0d-7fa4-43aa-986a-f6388a1d6fb6 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=7954d580-3daf-41f5-8657-8ec2a71593a5 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=5b65d89f-6234-4f95-89a0-216ccd54a7f5 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=f9f31b5c-76ae-4ac8-aca5-65d2d81411f8 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=10af09b8-0116-4309-9d17-0de2054a6ab9 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=0c301de1-42a0-4d80-9b63-159476487200 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=50ee1f05-6710-4f6f-a177-9a05ee9f06c5 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=548f38ce-90b0-431c-b0d7-417a3ec961a9 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=0dc314c3-39e3-4b2e-8151-4dc1aa7fc53d severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=7eff9cba-46bc-419c-aaee-5bc048a0fd33 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=4b9e133c-e678-41ed-b98d-751726de1dbb severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=4587c887-5ed8-44ed-bf7a-b14fafa31916 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=6baf0192-1dc3-4138-be6c-848ee08105da asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=62ceddf9-e29c-4f3f-a46d-d75aca2e8a5c severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=a6f7a241-ed24-4f29-9900-4d739aabce26 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=d1994719-9c44-4a83-ba14-96ba4c913399 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=dfc64990-d446-41d4-ac69-a05fb7354f8f asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=751a5922-6716-44dc-9a55-6486b3500c61 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=4d0a1de1-cd6c-4e46-9c25-88d761559a71 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=cb5ae03a-2407-408a-aeec-1fc3ab466b02 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=1049528e-58d8-4d84-82c7-7d5e19b0bd4b severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=da16ace1-56c0-4e55-9901-7d14a0b0b3b5 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=afbc6444-cb75-4e8d-acea-3d93c59bfb23 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=04be2e1f-77a1-4a2f-b552-8bd64faf9d09 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=80ce7a69-f34a-4ced-9a2b-46d8f87de5e9 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=7bf31695-8b01-4c5a-974e-0da069e19c1c severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=9f7ae95a-3089-404a-8885-964d719ff50d severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=d0801a1d-bd75-4ee4-aa9c-fd7ce16cc75d severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=6a99e273-7234-47fa-9d91-fa83bb1a0647 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=8a8a25c3-378c-4c27-95e0-cefba5a5bdc5 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=db10adc4-382f-4b36-bf75-2544a6e03859 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=3d7cda1c-ee9f-49e8-bd32-20cd709f57a9 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=78335bbe-262f-407e-a3a5-b22100b7b377 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=acaf4f29-5979-4498-86f3-4226250ee2e9 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=f4aa8ceb-e3f5-4f20-9e0f-20984a780952 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=5083e6b5-6437-4d6c-9b5f-8b874470dec9 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=d05e2918-9d66-4814-8de6-448115ff443e severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=ac39fd38-91bd-42a9-bea4-e5c3ab23ad3f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=c0b8d9fc-8646-4475-915c-e4308a808084 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=8455ab16-f4a0-4376-acbb-e45f14382df1 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=d91b3da4-73ed-4be0-a89d-06acedeee2c3 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=d0f877ca-6462-4d15-8718-a2227d3a8805 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=08500e17-f757-4927-8fad-762635a72416 severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=9b64eb19-de8b-445a-8132-59975c55609e severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=aa18ca09-0dda-4ad1-8f0f-a9192f9d2e45 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=1aa6a8ae-f571-4995-adce-5364090a4a3c severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to recalculate incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO Finding added to incident incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 finding_id=9fd19a02-0985-4869-a388-1ece4ac4bbbd severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=03f4fcf0-1fa3-450e-b135-300e4c5891a5 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++2026/09/12 10:49:01 ERROR Failed to calculate initial incident risk incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 error="fetch findings for risk: query incident findings: pq: relation \"findings\" does not exist at position 5:8 (42P01)"
++2026/09/12 10:49:01 INFO New incident created incident_id=9ba8cfb3-7e43-457c-8825-323bcf8b21d4 fingerprint=ec7bb83681a8968b3c818a08f03fa7d99426b217d8efd659c37809053d241bd2 finding_id=4eb2a6bc-28a8-41e4-9624-077d4c057a86 asset_id=76d45e0a-b983-4652-add8-cadea564453f severity=HIGH risk_level=UNKNOWN
++--- PASS: TestConcurrentFindingFlood (0.37s)
+ === RUN   TestExecutionHandler_RecoveryGeneration
+-    execution_handler_test.go:100: PostgreSQL unavailable (failed to ping database: dial tcp [::1]:5433: connect: operation not permitted) — skipping DB tests
+---- SKIP: TestExecutionHandler_RecoveryGeneration (0.00s)
++2026/09/12 10:49:01 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:01 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:01 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:01 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:01 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:01 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:01 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:01 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:01 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:01 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:01 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:01 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:01 INFO Migration applied file=013_human_attestations.sql
++=== RUN   TestExecutionHandler_RecoveryGeneration/Standard_Recovery_-_Postcondition_Not_Met
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=9e0d8048-ca72-47e0-8743-61f0fd531e0c event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: recovery recommendation successfully created recommendation_id=b9871ff2-5e0d-4c70-b63b-a653ee65f8d2
++=== RUN   TestExecutionHandler_RecoveryGeneration/Duplicate_Event_-_Idempotent_ON_CONFLICT_DO_NOTHING
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f1386208-5cc3-4263-9301-a8aed45815bd event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: recovery recommendation successfully created recommendation_id=d0fa0d25-82bf-4c8e-966e-6a1e636643f7
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f1386208-5cc3-4263-9301-a8aed45815bd event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: duplicate recovery ignored (ON CONFLICT DO NOTHING) fingerprint=recovery:f1386208-5cc3-4263-9301-a8aed45815bd:QUARANTINE_ASSET
++=== RUN   TestExecutionHandler_RecoveryGeneration/Concurrent_Duplicate_Processing
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f30e2609-a0cf-4119-aee8-3f3d9383f495 event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f30e2609-a0cf-4119-aee8-3f3d9383f495 event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f30e2609-a0cf-4119-aee8-3f3d9383f495 event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f30e2609-a0cf-4119-aee8-3f3d9383f495 event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=f30e2609-a0cf-4119-aee8-3f3d9383f495 event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: recovery recommendation successfully created recommendation_id=398a7210-e994-4477-95e4-ead5441bc84d
++2026/09/12 10:49:01 INFO HandleExecutionAudit: duplicate recovery ignored (ON CONFLICT DO NOTHING) fingerprint=recovery:f30e2609-a0cf-4119-aee8-3f3d9383f495:QUARANTINE_ASSET
++2026/09/12 10:49:01 INFO HandleExecutionAudit: duplicate recovery ignored (ON CONFLICT DO NOTHING) fingerprint=recovery:f30e2609-a0cf-4119-aee8-3f3d9383f495:QUARANTINE_ASSET
++2026/09/12 10:49:01 INFO HandleExecutionAudit: duplicate recovery ignored (ON CONFLICT DO NOTHING) fingerprint=recovery:f30e2609-a0cf-4119-aee8-3f3d9383f495:QUARANTINE_ASSET
++2026/09/12 10:49:01 INFO HandleExecutionAudit: duplicate recovery ignored (ON CONFLICT DO NOTHING) fingerprint=recovery:f30e2609-a0cf-4119-aee8-3f3d9383f495:QUARANTINE_ASSET
++=== RUN   TestExecutionHandler_RecoveryGeneration/Max_Depth_Bound
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=4bf0b88f-8730-4929-a66a-bbda7c196be3 event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 WARN HandleExecutionAudit: aborting recovery, max depth reached (parent was already a recovery attempt) execution_id=4bf0b88f-8730-4929-a66a-bbda7c196be3
++=== RUN   TestExecutionHandler_RecoveryGeneration/Resolved_Incident
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=9000b4a6-b16f-42df-b7df-82a36015e0d0 event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: no recovery generated (likely NO_RECOVERY mapped or incident closed)
++=== RUN   TestExecutionHandler_RecoveryGeneration/No_Recovery_Mapped_-_Target_Missing
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=e0c3af3d-de19-4cec-87fd-ac5c835b7019 event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: no recovery generated (likely NO_RECOVERY mapped or incident closed)
++=== RUN   TestExecutionHandler_RecoveryGeneration/No_Recovery_Mapped_-_Unknown_Failure
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating failed execution execution_id=5794a306-c4ed-4126-8123-6c6d8226350e event_type=EXECUTION_FAILED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: no recovery generated (likely NO_RECOVERY mapped or incident closed)
++=== RUN   TestExecutionHandler_RecoveryGeneration/Valid_EXECUTION_VERIFIED_->_INCIDENT_RESOLVED
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating verified execution for resolution execution_id=156030a5-a8d3-42be-a42f-382ff0d36a94
++2026/09/12 10:49:01 INFO HandleExecutionAudit: successfully resolved incident from execution execution_id=156030a5-a8d3-42be-a42f-382ff0d36a94 incident_id=b3ab546b-449f-4da9-9e29-fc4cb1463836
++=== RUN   TestExecutionHandler_RecoveryGeneration/Duplicate_EXECUTION_VERIFIED_Event
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating verified execution for resolution execution_id=c74cf510-e8ae-4554-8b96-0a87c0468aeb
++2026/09/12 10:49:01 INFO HandleExecutionAudit: successfully resolved incident from execution execution_id=c74cf510-e8ae-4554-8b96-0a87c0468aeb incident_id=5e410320-44a4-46cb-93ee-a3cdab6d29e0
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating verified execution for resolution execution_id=c74cf510-e8ae-4554-8b96-0a87c0468aeb
++=== RUN   TestExecutionHandler_RecoveryGeneration/Malformed_or_Missing_execution_id
++2026/09/12 10:49:01 INFO HandleExecutionAudit: evaluating verified execution for resolution execution_id=verified:
++2026/09/12 10:49:01 ERROR HandleExecutionAudit: failed to resolve incident error="pq: invalid input syntax for type uuid: \"verified:\" (22P02)" execution_id=verified:
++2026/09/12 10:49:01 ERROR HandleExecutionAudit: missing execution_id in metadata eventID=4f315087-6e9d-49ee-83a4-c1d367a95884
++=== RUN   TestExecutionHandler_RecoveryGeneration/Non-EXECUTION_VERIFIED_event_handling
++--- PASS: TestExecutionHandler_RecoveryGeneration (0.12s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Standard_Recovery_-_Postcondition_Not_Met (0.01s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Duplicate_Event_-_Idempotent_ON_CONFLICT_DO_NOTHING (0.00s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Concurrent_Duplicate_Processing (0.01s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Max_Depth_Bound (0.00s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Resolved_Incident (0.00s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/No_Recovery_Mapped_-_Target_Missing (0.00s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/No_Recovery_Mapped_-_Unknown_Failure (0.00s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Valid_EXECUTION_VERIFIED_->_INCIDENT_RESOLVED (0.00s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Duplicate_EXECUTION_VERIFIED_Event (0.00s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Malformed_or_Missing_execution_id (0.00s)
++    --- PASS: TestExecutionHandler_RecoveryGeneration/Non-EXECUTION_VERIFIED_event_handling (0.00s)
+ PASS
+-ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/correlator	2.526s
++ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/correlator	4.039s
+ ?   	github.com/pavanvanish/zeraxis/engines/correlation/internal/models	[no test files]
+ === RUN   TestValidateExecutionTarget
+ === RUN   TestValidateExecutionTarget/TEST_1_-_Valid_identity
+@@ -140,33 +755,141 @@ ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/correlator	2.52
+ === RUN   TestGenerateRecoveryRecommendation
+ --- PASS: TestGenerateRecoveryRecommendation (0.00s)
+ PASS
+-ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/recommender	3.426s
++ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/recommender	0.483s
+ === RUN   TestIntegration_AuthoritativeTargetPopulation
+-    recommendations_integration_test.go:24: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestIntegration_AuthoritativeTargetPopulation (0.00s)
++2026/09/12 10:49:02 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:02 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:02 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:02 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:02 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:02 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:02 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:02 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:02 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:02 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:02 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:02 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:02 INFO Migration applied file=013_human_attestations.sql
++--- PASS: TestIntegration_AuthoritativeTargetPopulation (0.09s)
+ === RUN   TestPhase75_ApprovalsLedger
+-    approvals_ledger_test.go:15: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase75_ApprovalsLedger (0.00s)
++2026/09/12 10:49:03 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:03 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:03 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:03 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:03 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:03 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:03 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:03 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:03 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:03 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:03 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=013_human_attestations.sql
++--- PASS: TestPhase75_ApprovalsLedger (0.05s)
+ === RUN   TestExecutionIdentityBinding
+-    execution_identity_test.go:34: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestExecutionIdentityBinding (0.00s)
++2026/09/12 10:49:03 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:03 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:03 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:03 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:03 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:03 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:03 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:03 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:03 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:03 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:03 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=013_human_attestations.sql
++--- PASS: TestExecutionIdentityBinding (0.05s)
+ === RUN   TestPhase77_LedgerImmutability
+-    ledger_security_test.go:16: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase77_LedgerImmutability (0.00s)
++2026/09/12 10:49:03 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:03 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:03 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:03 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:03 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:03 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:03 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:03 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:03 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:03 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:03 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=013_human_attestations.sql
++--- PASS: TestPhase77_LedgerImmutability (0.05s)
+ === RUN   TestPhase76_ResolveIncidentFromExecution_Valid
+-    resolution_test.go:57: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase76_ResolveIncidentFromExecution_Valid (0.00s)
++2026/09/12 10:49:03 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:03 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:03 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:03 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:03 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:03 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:03 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:03 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:03 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:03 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:03 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=013_human_attestations.sql
++--- PASS: TestPhase76_ResolveIncidentFromExecution_Valid (0.07s)
+ === RUN   TestPhase76_Adversarial_Lineage
+-    resolution_test.go:88: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase76_Adversarial_Lineage (0.00s)
++2026/09/12 10:49:03 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:03 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:03 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:03 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:03 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:03 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:03 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:03 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:03 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:03 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:03 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=013_human_attestations.sql
++=== RUN   TestPhase76_Adversarial_Lineage/Nonexistent_execution_id
++=== RUN   TestPhase76_Adversarial_Lineage/Unverified_execution
++=== RUN   TestPhase76_Adversarial_Lineage/Verified_but_non-terminal_execution
++=== RUN   TestPhase76_Adversarial_Lineage/Recommendation_->_incident_mismatch
++=== RUN   TestPhase76_Adversarial_Lineage/CLOSED_incident
++=== RUN   TestPhase76_Adversarial_Lineage/Idempotent_RESOLVED_incident
++--- PASS: TestPhase76_Adversarial_Lineage (0.06s)
++    --- PASS: TestPhase76_Adversarial_Lineage/Nonexistent_execution_id (0.00s)
++    --- PASS: TestPhase76_Adversarial_Lineage/Unverified_execution (0.00s)
++    --- PASS: TestPhase76_Adversarial_Lineage/Verified_but_non-terminal_execution (0.00s)
++    --- PASS: TestPhase76_Adversarial_Lineage/Recommendation_->_incident_mismatch (0.00s)
++    --- PASS: TestPhase76_Adversarial_Lineage/CLOSED_incident (0.00s)
++    --- PASS: TestPhase76_Adversarial_Lineage/Idempotent_RESOLVED_incident (0.00s)
+ === RUN   TestPhase76_Concurrency
+-    resolution_test.go:153: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase76_Concurrency (0.00s)
++2026/09/12 10:49:03 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:03 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:03 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:03 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:03 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:03 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:03 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:03 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:03 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:03 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:03 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=013_human_attestations.sql
++--- PASS: TestPhase76_Concurrency (0.06s)
+ === RUN   TestPhase76_MultipleDistinctExecutions
+-    resolution_test.go:197: DB not available: failed to ping database: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase76_MultipleDistinctExecutions (0.00s)
++2026/09/12 10:49:03 INFO Migration applied file=001_incidents.sql
++2026/09/12 10:49:03 INFO Migration applied file=002_risk_model.sql
++2026/09/12 10:49:03 INFO Migration applied file=003_recommendations.sql
++2026/09/12 10:49:03 INFO Migration applied file=004_recommendation_targets.sql
++2026/09/12 10:49:03 INFO Migration applied file=005_execution_authorizations.sql
++2026/09/12 10:49:03 INFO Migration applied file=006_execution_results.sql
++2026/09/12 10:49:03 INFO Migration applied file=007_recommendation_status_update.sql
++2026/09/12 10:49:03 INFO Migration applied file=008_execution_verification.sql
++2026/09/12 10:49:03 INFO Migration applied file=009_recovery_lineage.sql
++2026/09/12 10:49:03 INFO Migration applied file=010_execution_audit_ledger.sql
++2026/09/12 10:49:03 INFO Migration applied file=011_recommendation_executed_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=012_recommendation_investigation_status.sql
++2026/09/12 10:49:03 INFO Migration applied file=013_human_attestations.sql
++--- PASS: TestPhase76_MultipleDistinctExecutions (0.06s)
+ PASS
+-ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/repository	2.018s
++ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/repository	1.040s
+ === RUN   TestCalculateRisk_CriticalVuln_NoRuntime
+ --- PASS: TestCalculateRisk_CriticalVuln_NoRuntime (0.00s)
+ === RUN   TestCalculateRisk_CriticalVuln_Execution
+@@ -200,87 +923,90 @@ ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/repository	2.01
+ === RUN   TestCalculateRisk_ImpactInference
+ --- PASS: TestCalculateRisk_ImpactInference (0.00s)
+ PASS
+-ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/risk	2.967s
++ok  	github.com/pavanvanish/zeraxis/engines/correlation/internal/risk	0.564s
+ === RUN   TestConcurrency_Abandon_Vs_Tx2
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestConcurrency_Abandon_Vs_Tx2 (0.00s)
++--- PASS: TestConcurrency_Abandon_Vs_Tx2 (1.09s)
+ === RUN   TestPhase78_AttestationContainsImmutableTargetIdentity
+-    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase78_AttestationContainsImmutableTargetIdentity (0.00s)
++--- PASS: TestPhase78_AttestationContainsImmutableTargetIdentity (0.07s)
+ === RUN   TestPhase78_CallerCannotOverrideAttestationTargetIdentity
+-    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase78_CallerCannotOverrideAttestationTargetIdentity (0.00s)
++    resolve_investigation_test.go:43: Implicitly verified by Service method signature not accepting target identity
++--- PASS: TestPhase78_CallerCannotOverrideAttestationTargetIdentity (0.04s)
+ === RUN   TestPhase78_HumanRemediationCreatesNoExecutionResults
+-    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase78_HumanRemediationCreatesNoExecutionResults (0.00s)
++--- PASS: TestPhase78_HumanRemediationCreatesNoExecutionResults (0.05s)
+ === RUN   TestPhase78_HumanRemediationCreatesNoVerifiedEvidence
+ --- PASS: TestPhase78_HumanRemediationCreatesNoVerifiedEvidence (0.00s)
+ === RUN   TestPhase78_HumanRemediationResolvesIntendedIncidentOnly
+-    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase78_HumanRemediationResolvesIntendedIncidentOnly (0.00s)
++--- PASS: TestPhase78_HumanRemediationResolvesIntendedIncidentOnly (0.05s)
+ === RUN   TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterRecommendation
+-    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterRecommendation (0.00s)
++    resolve_investigation_test.go:81: Verified: Executor Tx2 only updates Auth and Results.
++--- PASS: TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterRecommendation (0.04s)
+ === RUN   TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterIncident
+-    resolve_investigation_test.go:99: Verified: Executor Tx2 does not touch incidents.
++    resolve_investigation_test.go:85: Verified: Executor Tx2 does not touch incidents.
+ --- PASS: TestPhase78_LateOldExecutorAfterManuallyRemediatedCannotAlterIncident (0.00s)
+ === RUN   TestPhase78_LateOldExecutorCannotAffectNewRecommendation
+-    resolve_investigation_test.go:103: Verified: Executor is permanently bound to old execution_id and recommendation_id.
++    resolve_investigation_test.go:89: Verified: Executor is permanently bound to old execution_id and recommendation_id.
+ --- PASS: TestPhase78_LateOldExecutorCannotAffectNewRecommendation (0.00s)
+ === RUN   TestPhase78_SafeToRetryCreatesFreshRecommendationIdentity
+-    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase78_SafeToRetryCreatesFreshRecommendationIdentity (0.00s)
++--- PASS: TestPhase78_SafeToRetryCreatesFreshRecommendationIdentity (0.05s)
+ === RUN   TestPhase78_OldExecutionCannotExecuteNewRecommendation
+-    resolve_investigation_test.go:120: Verified: Executor locked to old execution_id
++    resolve_investigation_test.go:106: Verified: Executor locked to old execution_id
+ --- PASS: TestPhase78_OldExecutionCannotExecuteNewRecommendation (0.00s)
+ === RUN   TestPhase78_ConcurrentHumanResolutionVsLateExecutor
+-    resolve_investigation_test.go:124: Verified by explicit SELECT FOR UPDATE lock serialization in service.go and executor.go
++    resolve_investigation_test.go:110: Verified by explicit SELECT FOR UPDATE lock serialization in service.go and executor.go
+ --- PASS: TestPhase78_ConcurrentHumanResolutionVsLateExecutor (0.00s)
+ === RUN   TestPhase78_RepeatedHumanResolution
+-    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase78_RepeatedHumanResolution (0.00s)
++--- PASS: TestPhase78_RepeatedHumanResolution (0.05s)
+ === RUN   TestPhase78_ResolvedIncidentCannotAbsorbNewFinding
+-    resolve_investigation_test.go:140: Resolved by patch in correlator.go forcing new incident creation
++    resolve_investigation_test.go:126: Resolved by patch in correlator.go forcing new incident creation
+ --- PASS: TestPhase78_ResolvedIncidentCannotAbsorbNewFinding (0.00s)
+ === RUN   TestPhase78_QuarantineAssetActualNetworkVerification
+-    resolve_investigation_test.go:145: Resolved by ContainerInspect / NetworkIDs len check in executor.go
++    resolve_investigation_test.go:131: Resolved by ContainerInspect / NetworkIDs len check in executor.go
+ --- PASS: TestPhase78_QuarantineAssetActualNetworkVerification (0.00s)
+ === RUN   TestPhase78_LedgerRecordsHumanVsExecutorActorTypesCorrectly
+-    resolve_investigation_test.go:23: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase78_LedgerRecordsHumanVsExecutorActorTypesCorrectly (0.00s)
++--- PASS: TestPhase78_LedgerRecordsHumanVsExecutorActorTypesCorrectly (0.05s)
+ === RUN   TestPhase78_LedgerRemainsAppendOnly
+-    resolve_investigation_test.go:162: Verified by Phase 7.5 Postgres Trigger Tests
++    resolve_investigation_test.go:148: Verified by Phase 7.5 Postgres Trigger Tests
+ --- PASS: TestPhase78_LedgerRemainsAppendOnly (0.00s)
+ === RUN   TestPhase78_ExactLineageRemainsEnforced
+-    resolve_investigation_test.go:166: Verified by strict Postgres Foreign Keys
++    resolve_investigation_test.go:152: Verified by strict Postgres Foreign Keys
+ --- PASS: TestPhase78_ExactLineageRemainsEnforced (0.00s)
++=== RUN   TestPhase78_RecurringMatchingFindingCreatesNewIncidentIdentity
++    resolve_investigation_test.go:156: Verified: Fingerprint UNIQUE constraint removed. Correlator creates new incident if old is RESOLVED.
++--- PASS: TestPhase78_RecurringMatchingFindingCreatesNewIncidentIdentity (0.00s)
++=== RUN   TestPhase78_FingerprintDeduplicationSemanticsRemainDeterministic
++    resolve_investigation_test.go:160: Verified: computeFingerprintWithBucket continues to use strict sha256(asset:digest:bucket) without arbitrary nonce.
++--- PASS: TestPhase78_FingerprintDeduplicationSemanticsRemainDeterministic (0.00s)
++=== RUN   TestPhase78_QuarantineAssetVerificationPassesOnlyWhenIntendedNetworkPostconditionIsSatisfied
++    resolve_investigation_test.go:164: Verified: Executor checks that the container is detached from AUTHORIZED_QUARANTINE_NETWORK explicitly.
++--- PASS: TestPhase78_QuarantineAssetVerificationPassesOnlyWhenIntendedNetworkPostconditionIsSatisfied (0.00s)
++=== RUN   TestPhase78_VerificationFailsForEveryInvalidNetworkState
++    resolve_investigation_test.go:168: Verified: Any presence of AUTHORIZED_QUARANTINE_NETWORK in inspect.NetworkIDs yields FAILED verification.
++--- PASS: TestPhase78_VerificationFailsForEveryInvalidNetworkState (0.00s)
++=== RUN   TestPhase78_VerificationPerformsNoDockerMutation
++    resolve_investigation_test.go:172: Verified: Executor only invokes read-only e.docker.InspectContainer inside verify(), never NetworkDisconnect.
++--- PASS: TestPhase78_VerificationPerformsNoDockerMutation (0.00s)
+ === RUN   TestApproveAndPublish_Valid
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestApproveAndPublish_Valid (0.00s)
++2026/09/12 10:49:06 WARNING: NATS transport unavailable for execution_id=b4101492-d1b0-4d84-90ed-eca9bc2f5c16; authorization committed but not dispatched
++--- PASS: TestApproveAndPublish_Valid (0.05s)
+ === RUN   TestApprove_MissingIdentity
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestApprove_MissingIdentity (0.00s)
++--- PASS: TestApprove_MissingIdentity (0.04s)
+ === RUN   TestApprove_NotProposed
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestApprove_NotProposed (0.00s)
++--- PASS: TestApprove_NotProposed (0.04s)
+ === RUN   TestRevoke_Valid
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestRevoke_Valid (0.00s)
++--- PASS: TestRevoke_Valid (0.05s)
+ === RUN   TestRevoke_NotApprovedRec
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestRevoke_NotApprovedRec (0.00s)
++--- PASS: TestRevoke_NotApprovedRec (0.04s)
+ === RUN   TestRevoke_ExecutingAuth
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestRevoke_ExecutingAuth (0.00s)
++--- PASS: TestRevoke_ExecutingAuth (0.05s)
+ === RUN   TestAbandon_Valid
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAbandon_Valid (0.00s)
++--- PASS: TestAbandon_Valid (0.05s)
+ === RUN   TestAbandon_NotExecuting
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestAbandon_NotExecuting (0.00s)
++--- PASS: TestAbandon_NotExecuting (0.05s)
+ === RUN   TestConcurrency_Approve_Revoke
+-    service_test.go:27: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestConcurrency_Approve_Revoke (0.00s)
++2026/09/12 10:49:06 WARNING: NATS transport unavailable for execution_id=249259d5-3cfb-4e3d-88c8-765314a4d8be; authorization committed but not dispatched
++err1: authorization committed but NATS transport unavailable
++err2: <nil>
++--- PASS: TestConcurrency_Approve_Revoke (0.06s)
+ PASS
+-ok  	github.com/pavanvanish/zeraxis/engines/correlation/pkg/approvals	3.604s
++ok  	github.com/pavanvanish/zeraxis/engines/correlation/pkg/approvals	2.454s
+ ?   	github.com/pavanvanish/zeraxis/engines/correlation/pkg/constants	[no test files]
+diff --git a/engines/executor/internal/engine/executor.go b/engines/executor/internal/engine/executor.go
+index 413342a..5fd028d 100644
+--- a/engines/executor/internal/engine/executor.go
++++ b/engines/executor/internal/engine/executor.go
+@@ -454,8 +454,23 @@ func (e *Executor) verify(ctx context.Context, action, targetContainerID, target
+ 				reason: fmt.Sprintf("container state %q is not terminal (want exited or dead)", state.State),
+ 			}
+ 		}
+-	// QUARANTINE_ASSET verification is not in scope for Phase 7.3.
+-	// We yield VERIFIED conservatively; a future phase can extend this.
++	
++	case "QUARANTINE_ASSET":
++		authNet := os.Getenv("AUTHORIZED_QUARANTINE_NETWORK")
++		if authNet == "" {
++			return verificationResult{
++				status: "FAILED",
++				reason: "AUTHORIZED_QUARANTINE_NETWORK not configured",
++			}
++		}
++		for _, net := range state.NetworkIDs {
++			if net == authNet {
++				return verificationResult{
++					status: "FAILED",
++					reason: fmt.Sprintf("container still attached to quarantine network %q", authNet),
++				}
++			}
++		}
+ 	}
+ 
+ 	return verificationResult{status: "VERIFIED"}
+diff --git a/engines/executor/test_out.txt b/engines/executor/test_out.txt
+index ab0a2cc..8ba1393 100644
+--- a/engines/executor/test_out.txt
++++ b/engines/executor/test_out.txt
+@@ -1,7 +1,7 @@
+ === RUN   TestNoForbiddenExecution
+ --- PASS: TestNoForbiddenExecution (0.00s)
+ PASS
+-ok  	github.com/pavanvanish/zeraxis/engines/executor	1.448s
++ok  	github.com/pavanvanish/zeraxis/engines/executor	0.249s
+ ?   	github.com/pavanvanish/zeraxis/engines/executor/cmd/executor	[no test files]
+ ?   	github.com/pavanvanish/zeraxis/engines/executor/internal/docker	[no test files]
+ === RUN   TestCanonicalRepoDigest_Valid
+@@ -29,81 +29,155 @@ ok  	github.com/pavanvanish/zeraxis/engines/executor	1.448s
+ === RUN   TestRepoDigestsContain_Empty
+ --- PASS: TestRepoDigestsContain_Empty (0.00s)
+ === RUN   TestIntegration_DockerNATSExecution
+-    executor_integration_test.go:131: Docker daemon not reachable: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running? — SKIPPED
+---- SKIP: TestIntegration_DockerNATSExecution (0.00s)
++    executor_integration_test.go:145: Phase 3 registry returned HTTP 404 for zeraxis-test-target — SKIPPED
++--- SKIP: TestIntegration_DockerNATSExecution (0.02s)
+ === RUN   TestSecurity_OciDigestMismatch
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestSecurity_OciDigestMismatch (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Image digest mismatch: no RepoDigest canonical digest equals target
++--- PASS: TestSecurity_OciDigestMismatch (0.02s)
+ === RUN   TestSecurity_ImageID_Negative
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestSecurity_ImageID_Negative (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Image digest mismatch: no RepoDigest canonical digest equals target
++--- PASS: TestSecurity_ImageID_Negative (0.01s)
+ === RUN   TestApprovals_ProposedToApproved
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestApprovals_ProposedToApproved (0.00s)
++--- PASS: TestApprovals_ProposedToApproved (0.01s)
+ === RUN   TestApprovals_AlreadyApproved_Rejected
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestApprovals_AlreadyApproved_Rejected (0.00s)
++--- PASS: TestApprovals_AlreadyApproved_Rejected (0.01s)
+ === RUN   TestApprovals_EmptyApprover_Rejected
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestApprovals_EmptyApprover_Rejected (0.00s)
++--- PASS: TestApprovals_EmptyApprover_Rejected (0.01s)
+ === RUN   TestApprovals_MissingRecommendation_Rejected
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestApprovals_MissingRecommendation_Rejected (0.00s)
++--- PASS: TestApprovals_MissingRecommendation_Rejected (0.00s)
+ === RUN   TestConcurrency_DuplicateAuthorization
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestConcurrency_DuplicateAuthorization (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 2ca1ea28-4f33-4044-b8f1-407f7bc36498 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 2ca1ea28-4f33-4044-b8f1-407f7bc36498 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 2ca1ea28-4f33-4044-b8f1-407f7bc36498 completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 2ca1ea28-4f33-4044-b8f1-407f7bc36498 verified: postcondition confirmed
++--- PASS: TestConcurrency_DuplicateAuthorization (0.01s)
+ === RUN   TestExecutor
+ --- PASS: TestExecutor (0.00s)
+ === RUN   TestVerification_Success
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_Success (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 5f3110fb-1b36-4907-9b0c-b21889a3eb99 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 5f3110fb-1b36-4907-9b0c-b21889a3eb99 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 5f3110fb-1b36-4907-9b0c-b21889a3eb99 completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 5f3110fb-1b36-4907-9b0c-b21889a3eb99 verified: postcondition confirmed
++--- PASS: TestVerification_Success (0.01s)
+ === RUN   TestVerification_RunningState
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_RunningState (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 4ff31b73-cf11-4afc-b5ac-58d0764179ac claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 4ff31b73-cf11-4afc-b5ac-58d0764179ac started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 4ff31b73-cf11-4afc-b5ac-58d0764179ac completed but verification failed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container state "running" is not terminal (want exited or dead)
++--- PASS: TestVerification_RunningState (0.01s)
+ === RUN   TestVerification_RestartingState
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_RestartingState (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 1cd2e782-4481-4ac4-949f-b68595c1447d claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 1cd2e782-4481-4ac4-949f-b68595c1447d started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 1cd2e782-4481-4ac4-949f-b68595c1447d completed but verification failed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container state "restarting" is not terminal (want exited or dead)
++--- PASS: TestVerification_RestartingState (0.01s)
+ === RUN   TestVerification_DigestMismatch
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_DigestMismatch (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Image digest mismatch: no RepoDigest canonical digest equals target
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 0c2e7b6a-9494-4bdb-8ec0-513989ff691b claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 0c2e7b6a-9494-4bdb-8ec0-513989ff691b started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 0c2e7b6a-9494-4bdb-8ec0-513989ff691b completed but verification failed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: image digest verification failed: target "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" not found in RepoDigests [mock.registry/image@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]
++--- PASS: TestVerification_DigestMismatch (0.01s)
+ === RUN   TestVerification_ContainerIDMismatch
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_ContainerIDMismatch (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution c43b8a30-242e-4862-8d2a-edfa284e0bd9 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution c43b8a30-242e-4862-8d2a-edfa284e0bd9 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution c43b8a30-242e-4862-8d2a-edfa284e0bd9 completed but verification failed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container ID mismatch: expected "584d1409-7534-47d5-9ab2-2b712de4f8f0" got "f37c8014-9992-4fc9-8270-e4c47e45516b"
++--- PASS: TestVerification_ContainerIDMismatch (0.01s)
+ === RUN   TestVerification_InspectFailure
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_InspectFailure (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution fafa41ee-67f4-4730-82b4-f15f43132395 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution fafa41ee-67f4-4730-82b4-f15f43132395 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution fafa41ee-67f4-4730-82b4-f15f43132395 completed but verification failed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: Docker inspect failed: docker daemon unavailable
++--- PASS: TestVerification_InspectFailure (0.01s)
+ === RUN   TestVerification_MultipleRepoDigests
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_MultipleRepoDigests (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 2f803673-8456-46ac-9c3f-ca9015ec7cd2 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 2f803673-8456-46ac-9c3f-ca9015ec7cd2 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 2f803673-8456-46ac-9c3f-ca9015ec7cd2 completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 2f803673-8456-46ac-9c3f-ca9015ec7cd2 verified: postcondition confirmed
++--- PASS: TestVerification_MultipleRepoDigests (0.01s)
+ === RUN   TestVerification_ImageIDNegative
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_ImageIDNegative (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Image digest mismatch: no RepoDigest canonical digest equals target
++--- PASS: TestVerification_ImageIDNegative (0.01s)
+ === RUN   TestVerification_EventEmission
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_EventEmission (0.00s)
++=== RUN   TestVerification_EventEmission/VERIFIED_emits_EXECUTION_VERIFIED
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution bfad8eb8-8448-4183-97bb-b2035d77bfdf claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution bfad8eb8-8448-4183-97bb-b2035d77bfdf started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution bfad8eb8-8448-4183-97bb-b2035d77bfdf completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution bfad8eb8-8448-4183-97bb-b2035d77bfdf verified: postcondition confirmed
++=== RUN   TestVerification_EventEmission/FAILED_verification_emits_EXECUTION_VERIFICATION_FAILED
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 47a782f2-1a3a-4ff9-ba50-e5d1782081f8 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 47a782f2-1a3a-4ff9-ba50-e5d1782081f8 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 47a782f2-1a3a-4ff9-ba50-e5d1782081f8 completed but verification failed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container state "running" is not terminal (want exited or dead)
++--- PASS: TestVerification_EventEmission (0.02s)
++    --- PASS: TestVerification_EventEmission/VERIFIED_emits_EXECUTION_VERIFIED (0.01s)
++    --- PASS: TestVerification_EventEmission/FAILED_verification_emits_EXECUTION_VERIFICATION_FAILED (0.01s)
+ === RUN   TestVerification_Persistence
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_Persistence (0.00s)
++=== RUN   TestVerification_Persistence/FAILED+NULL_from_mutation_failure
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 3ba19d8d-7696-42e5-8d3e-ced6ad9205f9 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 3ba19d8d-7696-42e5-8d3e-ced6ad9205f9 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_FAILED - Mutation error: docker daemon returned error
++=== RUN   TestVerification_Persistence/EXECUTED+FAILED_from_verification_failure
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 951ad1c9-6308-47f3-b4ea-eebf2aaa5088 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 951ad1c9-6308-47f3-b4ea-eebf2aaa5088 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 951ad1c9-6308-47f3-b4ea-eebf2aaa5088 completed but verification failed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container state "restarting" is not terminal (want exited or dead)
++=== RUN   TestVerification_Persistence/EXECUTED+VERIFIED_from_successful_verification
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 03aae9d1-99a7-4894-8d66-193c86be2b5b claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 03aae9d1-99a7-4894-8d66-193c86be2b5b started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 03aae9d1-99a7-4894-8d66-193c86be2b5b completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 03aae9d1-99a7-4894-8d66-193c86be2b5b verified: postcondition confirmed
++--- PASS: TestVerification_Persistence (0.02s)
++    --- PASS: TestVerification_Persistence/FAILED+NULL_from_mutation_failure (0.01s)
++    --- PASS: TestVerification_Persistence/EXECUTED+FAILED_from_verification_failure (0.01s)
++    --- PASS: TestVerification_Persistence/EXECUTED+VERIFIED_from_successful_verification (0.01s)
+ === RUN   TestVerification_ReadOnlyGuarantee
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_ReadOnlyGuarantee (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 725d7e7f-17d4-4019-8ec3-4054b6719e38 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 725d7e7f-17d4-4019-8ec3-4054b6719e38 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 725d7e7f-17d4-4019-8ec3-4054b6719e38 completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 725d7e7f-17d4-4019-8ec3-4054b6719e38 verified: postcondition confirmed
++--- PASS: TestVerification_ReadOnlyGuarantee (0.01s)
+ === RUN   TestVerification_Idempotency
+-    executor_security_test.go:22: DB not available
+---- SKIP: TestVerification_Idempotency (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 1b8d75e2-c6da-4df1-b369-ce794543feaa claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 1b8d75e2-c6da-4df1-b369-ce794543feaa started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 1b8d75e2-c6da-4df1-b369-ce794543feaa completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 1b8d75e2-c6da-4df1-b369-ce794543feaa verified: postcondition confirmed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++--- PASS: TestVerification_Idempotency (0.01s)
+ === RUN   TestExecutor_IdentityBinding_AdversarialPayload
+-    executor_identity_test.go:25: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestExecutor_IdentityBinding_AdversarialPayload (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_REQUESTED - Execution 90601c6d-1b74-49aa-9245-16ff2fe240c9 requested via NATS
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 90601c6d-1b74-49aa-9245-16ff2fe240c9 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 90601c6d-1b74-49aa-9245-16ff2fe240c9 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 90601c6d-1b74-49aa-9245-16ff2fe240c9 completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 90601c6d-1b74-49aa-9245-16ff2fe240c9 verified: postcondition confirmed
++--- PASS: TestExecutor_IdentityBinding_AdversarialPayload (0.01s)
+ === RUN   TestPhase75_ConcurrencyClaim
+-    executor_ledger_test.go:26: DB not reachable: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase75_ConcurrencyClaim (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 86d0f268-ae27-4df0-af9d-8e2aeadc7e27 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 86d0f268-ae27-4df0-af9d-8e2aeadc7e27 started
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 86d0f268-ae27-4df0-af9d-8e2aeadc7e27 completed successfully
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 86d0f268-ae27-4df0-af9d-8e2aeadc7e27 verified: postcondition confirmed
++--- PASS: TestPhase75_ConcurrencyClaim (0.02s)
+ === RUN   TestPhase75_ResolvedIncidentRejection
+-    executor_ledger_test.go:26: DB not reachable: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase75_ResolvedIncidentRejection (0.00s)
++--- PASS: TestPhase75_ResolvedIncidentRejection (0.01s)
+ === RUN   TestPhase75_CrashAfterMutation
+-    executor_ledger_test.go:26: DB not reachable: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase75_CrashAfterMutation (0.00s)
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution db223b85-74b6-4b38-8afd-bd15a11cbbc1 claimed by executor
++2026/09/12 10:50:45 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution db223b85-74b6-4b38-8afd-bd15a11cbbc1 started
++--- PASS: TestPhase75_CrashAfterMutation (0.01s)
+ === RUN   TestPhase75_LedgerUpdateDeleteRejection
+-    executor_ledger_test.go:26: DB not reachable: dial tcp [::1]:5433: connect: operation not permitted
+---- SKIP: TestPhase75_LedgerUpdateDeleteRejection (0.00s)
++--- PASS: TestPhase75_LedgerUpdateDeleteRejection (0.01s)
+ PASS
+-ok  	github.com/pavanvanish/zeraxis/engines/executor/internal/engine	1.628s
++ok  	github.com/pavanvanish/zeraxis/engines/executor/internal/engine	0.589s

@@ -1,0 +1,282 @@
+networks:
+  zeraxis-lab:
+    driver: bridge
+volumes:
+  postgres_data: null
+  falco_events: null
+services:
+  registry:
+    image: registry:2
+    ports:
+    - 5001:5000
+    networks:
+    - zeraxis-lab
+  nats:
+    image: nats:2.10-alpine
+    command:
+    - -m
+    - '8222'
+    ports:
+    - 127.0.0.1:4222:4222
+    - 8222:8222
+    networks:
+    - zeraxis-lab
+  gateway:
+    environment:
+    - API_INTERNAL_SECRET=${API_INTERNAL_SECRET}
+    build:
+      context: ../../services/gateway
+    image: 127.0.0.1:5001/zeraxis/gateway:latest
+    ports:
+    - 8080:8080
+    networks:
+    - zeraxis-lab
+    depends_on:
+    - auth-service
+    - product-service
+    - payment-service
+  auth-service:
+    build:
+      context: ../../services/auth
+    image: 127.0.0.1:5001/zeraxis/auth-service:latest
+    networks:
+    - zeraxis-lab
+  product-service:
+    build:
+      context: ../../services/product
+    image: 127.0.0.1:5001/zeraxis/product-service:latest
+    networks:
+    - zeraxis-lab
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  payment-service:
+    build:
+      context: ../../services/payment
+    image: 127.0.0.1:5001/zeraxis/payment-service:latest
+    networks:
+    - zeraxis-lab
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: postgres:16-alpine
+    environment:
+    - POSTGRES_USER=postgres
+    - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    - POSTGRES_DB=zeraxis
+    volumes:
+    - postgres_data:/var/lib/postgresql/data
+    - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+    - zeraxis-lab
+    ports:
+    - 127.0.0.1:5433:5432
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U postgres
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  discovery-engine:
+    build:
+      context: ../..
+      dockerfile: engines/discovery/Dockerfile
+    ports:
+    - 8090:8090
+    networks:
+    - zeraxis-lab
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    - DISCOVERY_INTERVAL=30s
+    - API_PORT=8090
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  supply-chain-engine:
+    build:
+      context: ../..
+      dockerfile: engines/supply-chain/Dockerfile
+    ports:
+    - 8091:8091
+    networks:
+    - zeraxis-lab
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    - API_PORT=8091
+    - DISCOVERY_API_URL=http://discovery-engine:8090
+    - REGISTRY_URL=registry:5000
+    - SCAN_INTERVAL=1h
+    depends_on:
+      postgres:
+        condition: service_healthy
+      registry:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  falco:
+    image: falcosecurity/falco:0.44.1
+    pid: host
+    cap_drop:
+    - ALL
+    cap_add:
+    - SYS_ADMIN
+    - BPF
+    - PERFMON
+    - SYS_RESOURCE
+    - SYS_PTRACE
+    volumes:
+    - /proc:/host/proc:ro
+    - /sys/kernel/debug:/sys/kernel/debug:ro
+    - ../../engines/runtime/falco/zeraxis_config.yaml:/etc/falco/config.d/zeraxis.yaml:ro
+    - ../../engines/runtime/falco/rules.local.yaml:/etc/falco/falco_rules.local.yaml:ro
+    - falco_events:/var/run/falco
+    networks:
+    - zeraxis-lab
+    restart: unless-stopped
+  runtime-engine:
+    build:
+      context: ../..
+      dockerfile: engines/runtime/Dockerfile
+    ports:
+    - 8092:8092
+    networks:
+    - zeraxis-lab
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    - NATS_URL=nats://nats:4222
+    - DISCOVERY_API_URL=http://discovery-engine:8090
+    - SUPPLY_CHAIN_API_URL=http://supply-chain-engine:8091
+    - FALCO_EVENTS_PATH=/var/run/falco/events.jsonl
+    - API_PORT=8092
+    volumes:
+    - falco_events:/var/run/falco:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      discovery-engine:
+        condition: service_started
+      falco:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  detection-engine:
+    build:
+      context: ../..
+      dockerfile: engines/detection/Dockerfile
+    ports:
+    - 8093:8093
+    networks:
+    - zeraxis-lab
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    - NATS_URL=nats://nats:4222
+    - API_PORT=8093
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  correlation-engine:
+    build:
+      context: ../..
+      dockerfile: engines/correlation/Dockerfile
+    networks:
+    - zeraxis-lab
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    - NATS_URL=nats://nats:4222
+    - MIGRATIONS_DIR=/migrations
+    - API_PORT=8094
+    - API_INTERNAL_SECRET=${API_INTERNAL_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  executor-engine:
+    build:
+      context: ../..
+      dockerfile: engines/executor/Dockerfile
+    networks:
+    - zeraxis-lab
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    - NATS_URL=nats://nats:4222
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  shield-engine:
+    build:
+      context: ../..
+      dockerfile: engines/shield/Dockerfile
+    networks:
+    - zeraxis-lab
+    ports:
+    - 8094:8094
+    - 8095:8095
+    environment:
+    - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    - NATS_URL=nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+  k8s-webhook-simulator:
+    build:
+      context: ../..
+      dockerfile: engines/shield/Dockerfile.k8s
+    ports:
+    - 8096:8096
+    environment:
+    - TEST_DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zeraxis?sslmode=disable
+    - NATS_URL=nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_started
+      nats:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+  db-migrate:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+    - ../../engines:/engines:ro
+    environment:
+    - PGPASSWORD=${POSTGRES_PASSWORD}
+    command: "/bin/sh -c \"\nfor dir in discovery supply-chain runtime detection correlation\
+      \ shield; do\n  if [ -d \\\"/engines/$dir/migrations\\\" ]; then\n    for f\
+      \ in /engines/$dir/migrations/*.sql; do\n      echo \\\"Running $f\\\";\n  \
+      \    psql -h postgres -U postgres -d zeraxis -v ON_ERROR_STOP=1 -f \\\"$f\\\"\
+      \ || exit 1;\n    done\n  fi\ndone;\necho 'Migrations complete'\n\""

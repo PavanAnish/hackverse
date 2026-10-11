@@ -1,0 +1,32 @@
+# ============================================================
+# PROCESS EXECUTION
+# Captures execve/execveat inside containers.
+# ============================================================
+- rule: ZERAXIS_PROCESS_EXEC
+  desc: Capture process execution inside containers for ZERAXIS runtime monitoring.
+  condition: evt.type in (execve, execveat) and evt.dir=< and container.id != host
+  output: "Process execution time=%evt.time container_id=%container.id proc_name=%proc.name proc_cmdline=%proc.cmdline pid=%proc.pid user_uid=%user.uid"
+  priority: INFORMATIONAL
+  tags: [zeraxis, process]
+
+# ============================================================
+# NETWORK CONNECTION
+# Captures meaningful TCP/UDP connections from containers.
+# ============================================================
+- rule: ZERAXIS_NET_CONNECT
+  desc: Capture network connections initiated or accepted by containers.
+  condition: evt.type in (connect, accept) and evt.dir=< and container.id != host and fd.typechar = 4 and fd.ip != "0.0.0.0"
+  output: "Network connection time=%evt.time container_id=%container.id proc_name=%proc.name fd_name=%fd.name proto=%fd.l4proto pid=%proc.pid"
+  priority: INFORMATIONAL
+  tags: [zeraxis, network]
+
+# ============================================================
+# FILE ACTIVITY
+# Captures file write/create operations in containers.
+# ============================================================
+- rule: ZERAXIS_FILE_WRITE
+  desc: Capture file write and create operations inside containers.
+  condition: evt.type in (open, openat, openat2) and evt.dir=< and evt.is_open_write = true and container.id != host and fd.typechar = f and not fd.name startswith /proc/ and not fd.name startswith /sys/ and not fd.name startswith /dev/
+  output: "File write time=%evt.time container_id=%container.id proc_name=%proc.name fd_name=%fd.name pid=%proc.pid user_uid=%user.uid"
+  priority: INFORMATIONAL
+  tags: [zeraxis, file]

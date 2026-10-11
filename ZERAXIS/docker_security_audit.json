@@ -1,0 +1,107 @@
+{
+  "Name": "/docker-runtime-engine-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": [
+    "docker_falco_events:/var/run/falco:ro"
+  ],
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-gateway-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": null,
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-supply-chain-engine-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": null,
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-discovery-engine-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": [
+    "/var/run/docker.sock:/var/run/docker.sock:ro"
+  ],
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-product-service-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": null,
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-payment-service-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": null,
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-postgres-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": [
+    "docker_postgres_data:/var/lib/postgresql/data:rw",
+    "/host_mnt/Users/pavanvanish/Documents/ZERAXIS/infrastructure/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:rw"
+  ],
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-registry-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": null,
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-nats-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": null,
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-falco-1",
+  "Privileged": false,
+  "CapAdd": [
+    "CAP_BPF",
+    "CAP_PERFMON",
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_RESOURCE"
+  ],
+  "Binds": [
+    "/Users/pavanvanish/Documents/ZERAXIS/engines/runtime/falco/rules.local.yaml:/etc/falco/falco_rules.local.yaml:ro",
+    "docker_falco_events:/var/run/falco:rw",
+    "/proc:/host/proc:ro",
+    "/sys/kernel/debug:/sys/kernel/debug:ro",
+    "/host_mnt/Users/pavanvanish/Documents/ZERAXIS/engines/runtime/falco/zeraxis_config.yaml:/etc/falco/config.d/zeraxis.yaml:ro"
+  ],
+  "PidMode": "host",
+  "NetworkMode": "docker_zeraxis-lab"
+}
+{
+  "Name": "/docker-auth-service-1",
+  "Privileged": false,
+  "CapAdd": null,
+  "Binds": null,
+  "PidMode": "",
+  "NetworkMode": "docker_zeraxis-lab"
+}

@@ -1,0 +1,30 @@
+    service_test.go:55: Failed to exec migration ../../migrations/002_risk_model.sql: pq: relation "incidents" does not exist (42P01)
+--- FAIL: TestApproveAndPublish_Valid (0.03s)
+=== RUN   TestApprove_MissingIdentity
+    service_test.go:55: Failed to exec migration ../../migrations/001_incidents.sql: pq: duplicate key value violates unique constraint "pg_type_typname_nsp_index" (23505)
+--- FAIL: TestApprove_MissingIdentity (0.02s)
+=== RUN   TestApprove_NotProposed
+    service_test.go:55: Failed to exec migration ../../migrations/003_recommendations.sql: pq: relation "incidents" does not exist (42P01)
+--- FAIL: TestApprove_NotProposed (0.03s)
+=== RUN   TestRevoke_Valid
+    service_test.go:55: Failed to exec migration ../../migrations/001_incidents.sql: pq: duplicate key value violates unique constraint "pg_type_typname_nsp_index" (23505)
+--- FAIL: TestRevoke_Valid (0.03s)
+=== RUN   TestRevoke_NotApprovedRec
+    service_test.go:55: Failed to exec migration ../../migrations/002_risk_model.sql: pq: relation "incidents" does not exist (42P01)
+--- FAIL: TestRevoke_NotApprovedRec (0.03s)
+=== RUN   TestRevoke_ExecutingAuth
+    service_test.go:55: Failed to exec migration ../../migrations/001_incidents.sql: pq: duplicate key value violates unique constraint "pg_type_typname_nsp_index" (23505)
+--- FAIL: TestRevoke_ExecutingAuth (0.02s)
+=== RUN   TestAbandon_Valid
+    service_test.go:55: Failed to exec migration ../../migrations/003_recommendations.sql: pq: relation "incidents" does not exist (42P01)
+--- FAIL: TestAbandon_Valid (0.03s)
+=== RUN   TestAbandon_NotExecuting
+    service_test.go:55: Failed to exec migration ../../migrations/002_risk_model.sql: pq: relation "incidents" does not exist (42P01)
+--- FAIL: TestAbandon_NotExecuting (0.03s)
+=== RUN   TestConcurrency_Approve_Revoke
+    service_test.go:55: Failed to exec migration ../../migrations/001_incidents.sql: pq: duplicate key value violates unique constraint "pg_type_typname_nsp_index" (23505)
+--- FAIL: TestConcurrency_Approve_Revoke (0.02s)
+FAIL
+FAIL	github.com/pavanvanish/zeraxis/engines/correlation/pkg/approvals	3.270s
+?   	github.com/pavanvanish/zeraxis/engines/correlation/pkg/constants	[no test files]
+FAIL

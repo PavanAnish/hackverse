@@ -1,0 +1,109 @@
+=== RUN   TestNoForbiddenExecution
+--- PASS: TestNoForbiddenExecution (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/executor	1.448s
+?   	github.com/pavanvanish/zeraxis/engines/executor/cmd/executor	[no test files]
+?   	github.com/pavanvanish/zeraxis/engines/executor/internal/docker	[no test files]
+=== RUN   TestCanonicalRepoDigest_Valid
+--- PASS: TestCanonicalRepoDigest_Valid (0.00s)
+=== RUN   TestCanonicalRepoDigest_MissingAt
+--- PASS: TestCanonicalRepoDigest_MissingAt (0.00s)
+=== RUN   TestCanonicalRepoDigest_Tag
+--- PASS: TestCanonicalRepoDigest_Tag (0.00s)
+=== RUN   TestCanonicalRepoDigest_Malformed
+--- PASS: TestCanonicalRepoDigest_Malformed (0.00s)
+=== RUN   TestValidateTargetDigest_Valid
+--- PASS: TestValidateTargetDigest_Valid (0.00s)
+=== RUN   TestValidateTargetDigest_ImageID_Rejected
+--- PASS: TestValidateTargetDigest_ImageID_Rejected (0.00s)
+=== RUN   TestValidateTargetDigest_Invalid
+--- PASS: TestValidateTargetDigest_Invalid (0.00s)
+=== RUN   TestRepoDigestsContain_Match
+--- PASS: TestRepoDigestsContain_Match (0.00s)
+=== RUN   TestRepoDigestsContain_Mismatch
+--- PASS: TestRepoDigestsContain_Mismatch (0.00s)
+=== RUN   TestRepoDigestsContain_ImageID_Cannot_Authorize
+--- PASS: TestRepoDigestsContain_ImageID_Cannot_Authorize (0.00s)
+=== RUN   TestRepoDigestsContain_MalformedEntries_Skipped
+--- PASS: TestRepoDigestsContain_MalformedEntries_Skipped (0.00s)
+=== RUN   TestRepoDigestsContain_Empty
+--- PASS: TestRepoDigestsContain_Empty (0.00s)
+=== RUN   TestIntegration_DockerNATSExecution
+    executor_integration_test.go:131: Docker daemon not reachable: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running? — SKIPPED
+--- SKIP: TestIntegration_DockerNATSExecution (0.00s)
+=== RUN   TestSecurity_OciDigestMismatch
+    executor_security_test.go:22: DB not available
+--- SKIP: TestSecurity_OciDigestMismatch (0.00s)
+=== RUN   TestSecurity_ImageID_Negative
+    executor_security_test.go:22: DB not available
+--- SKIP: TestSecurity_ImageID_Negative (0.00s)
+=== RUN   TestApprovals_ProposedToApproved
+    executor_security_test.go:22: DB not available
+--- SKIP: TestApprovals_ProposedToApproved (0.00s)
+=== RUN   TestApprovals_AlreadyApproved_Rejected
+    executor_security_test.go:22: DB not available
+--- SKIP: TestApprovals_AlreadyApproved_Rejected (0.00s)
+=== RUN   TestApprovals_EmptyApprover_Rejected
+    executor_security_test.go:22: DB not available
+--- SKIP: TestApprovals_EmptyApprover_Rejected (0.00s)
+=== RUN   TestApprovals_MissingRecommendation_Rejected
+    executor_security_test.go:22: DB not available
+--- SKIP: TestApprovals_MissingRecommendation_Rejected (0.00s)
+=== RUN   TestConcurrency_DuplicateAuthorization
+    executor_security_test.go:22: DB not available
+--- SKIP: TestConcurrency_DuplicateAuthorization (0.00s)
+=== RUN   TestExecutor
+--- PASS: TestExecutor (0.00s)
+=== RUN   TestVerification_Success
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_Success (0.00s)
+=== RUN   TestVerification_RunningState
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_RunningState (0.00s)
+=== RUN   TestVerification_RestartingState
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_RestartingState (0.00s)
+=== RUN   TestVerification_DigestMismatch
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_DigestMismatch (0.00s)
+=== RUN   TestVerification_ContainerIDMismatch
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_ContainerIDMismatch (0.00s)
+=== RUN   TestVerification_InspectFailure
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_InspectFailure (0.00s)
+=== RUN   TestVerification_MultipleRepoDigests
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_MultipleRepoDigests (0.00s)
+=== RUN   TestVerification_ImageIDNegative
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_ImageIDNegative (0.00s)
+=== RUN   TestVerification_EventEmission
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_EventEmission (0.00s)
+=== RUN   TestVerification_Persistence
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_Persistence (0.00s)
+=== RUN   TestVerification_ReadOnlyGuarantee
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_ReadOnlyGuarantee (0.00s)
+=== RUN   TestVerification_Idempotency
+    executor_security_test.go:22: DB not available
+--- SKIP: TestVerification_Idempotency (0.00s)
+=== RUN   TestExecutor_IdentityBinding_AdversarialPayload
+    executor_identity_test.go:25: DB not available: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestExecutor_IdentityBinding_AdversarialPayload (0.00s)
+=== RUN   TestPhase75_ConcurrencyClaim
+    executor_ledger_test.go:26: DB not reachable: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase75_ConcurrencyClaim (0.00s)
+=== RUN   TestPhase75_ResolvedIncidentRejection
+    executor_ledger_test.go:26: DB not reachable: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase75_ResolvedIncidentRejection (0.00s)
+=== RUN   TestPhase75_CrashAfterMutation
+    executor_ledger_test.go:26: DB not reachable: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase75_CrashAfterMutation (0.00s)
+=== RUN   TestPhase75_LedgerUpdateDeleteRejection
+    executor_ledger_test.go:26: DB not reachable: dial tcp [::1]:5433: connect: operation not permitted
+--- SKIP: TestPhase75_LedgerUpdateDeleteRejection (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/executor/internal/engine	1.628s

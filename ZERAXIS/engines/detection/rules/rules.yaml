@@ -1,0 +1,56 @@
+rules:
+  - rule_id: "rule-pkg-mgr"
+    rule_version: 1
+    name: "Package Manager Execution"
+    description: "A package manager was executed at runtime, indicating unexpected mutable infrastructure modifications."
+    severity: "HIGH"
+    confidence: "HIGH"
+    required_event_types: ["PROCESS_EXECUTION"]
+    conditions: 'event.metadata.process in ["apt", "apt-get", "dpkg", "apk", "yum", "dnf", "rpm"]'
+    group_by_fields: ["metadata.process"]
+    enabled: true
+
+  - rule_id: "rule-unexpected-shell"
+    rule_version: 1
+    name: "Unexpected Shell Spawning"
+    description: "A shell was executed, which may indicate remote command execution."
+    severity: "HIGH"
+    confidence: "MEDIUM"
+    required_event_types: ["PROCESS_EXECUTION"]
+    conditions: 'event.metadata.process in ["sh", "bash", "ash", "zsh"]'
+    group_by_fields: ["metadata.process"]
+    enabled: true
+
+  - rule_id: "rule-system-file-write"
+    rule_version: 1
+    name: "Sensitive System File Write"
+    description: "A process attempted to write to a sensitive system directory like /etc."
+    severity: "CRITICAL"
+    confidence: "HIGH"
+    required_event_types: ["FILE_ACTIVITY"]
+    conditions: 'event.metadata.operation == "WRITE" && (event.metadata.path.startsWith("/etc/") || event.metadata.path.startsWith("/usr/") || event.metadata.path.startsWith("/bin/") || event.metadata.path.startsWith("/sbin/"))'
+    group_by_fields: ["metadata.path"]
+    enabled: true
+
+  - rule_id: "rule-external-connection"
+    rule_version: 1
+    name: "Unexpected External Connection"
+    description: "A container made a connection to an external non-RFC1918 IP address."
+    severity: "MEDIUM"
+    confidence: "LOW"
+    required_event_types: ["NETWORK_CONNECTION"]
+    # CEL expression: check if it does NOT start with local subnets. Simple approximation for stateless.
+    conditions: 'event.metadata.direction == "egress" && !event.metadata.destination_ip.startsWith("10.") && !event.metadata.destination_ip.startsWith("172.") && !event.metadata.destination_ip.startsWith("192.168.") && !event.metadata.destination_ip.startsWith("127.")'
+    group_by_fields: ["metadata.destination_ip"]
+    enabled: true
+
+  - rule_id: "rule-execution-from-tmp"
+    rule_version: 1
+    name: "Execution from Writable Directory"
+    description: "A process was executed from a commonly writable directory like /tmp or /dev/shm."
+    severity: "HIGH"
+    confidence: "HIGH"
+    required_event_types: ["PROCESS_EXECUTION"]
+    conditions: 'event.metadata.executable != "" && (event.metadata.executable.startsWith("/tmp/") || event.metadata.executable.startsWith("/dev/shm/") || event.metadata.executable.startsWith("/var/tmp/"))'
+    group_by_fields: ["metadata.executable"]
+    enabled: true

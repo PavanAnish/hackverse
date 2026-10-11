@@ -1,0 +1,186 @@
+=== RUN   TestNoForbiddenExecution
+--- PASS: TestNoForbiddenExecution (0.00s)
+PASS
+ok  	github.com/pavanvanish/zeraxis/engines/executor	1.227s
+?   	github.com/pavanvanish/zeraxis/engines/executor/cmd/executor	[no test files]
+?   	github.com/pavanvanish/zeraxis/engines/executor/internal/docker	[no test files]
+=== RUN   TestCanonicalRepoDigest_Valid
+--- PASS: TestCanonicalRepoDigest_Valid (0.00s)
+=== RUN   TestCanonicalRepoDigest_MissingAt
+--- PASS: TestCanonicalRepoDigest_MissingAt (0.00s)
+=== RUN   TestCanonicalRepoDigest_Tag
+--- PASS: TestCanonicalRepoDigest_Tag (0.00s)
+=== RUN   TestCanonicalRepoDigest_Malformed
+--- PASS: TestCanonicalRepoDigest_Malformed (0.00s)
+=== RUN   TestValidateTargetDigest_Valid
+--- PASS: TestValidateTargetDigest_Valid (0.00s)
+=== RUN   TestValidateTargetDigest_ImageID_Rejected
+--- PASS: TestValidateTargetDigest_ImageID_Rejected (0.00s)
+=== RUN   TestValidateTargetDigest_Invalid
+--- PASS: TestValidateTargetDigest_Invalid (0.00s)
+=== RUN   TestRepoDigestsContain_Match
+--- PASS: TestRepoDigestsContain_Match (0.00s)
+=== RUN   TestRepoDigestsContain_Mismatch
+--- PASS: TestRepoDigestsContain_Mismatch (0.00s)
+=== RUN   TestRepoDigestsContain_ImageID_Cannot_Authorize
+--- PASS: TestRepoDigestsContain_ImageID_Cannot_Authorize (0.00s)
+=== RUN   TestRepoDigestsContain_MalformedEntries_Skipped
+--- PASS: TestRepoDigestsContain_MalformedEntries_Skipped (0.00s)
+=== RUN   TestRepoDigestsContain_Empty
+--- PASS: TestRepoDigestsContain_Empty (0.00s)
+=== RUN   TestIntegration_DockerNATSExecution
+    executor_integration_test.go:172: Using external NATS at localhost:4222
+2026/09/12 11:21:10 CRITICAL: Execution failed for execution_id 5e5f6040-58b8-4c34-977d-a52f71b37609: DENY: authorization revoked, expired, or already executed
+    executor_integration_test.go:319: Execution failed/aborted: {"details":"Authorization revoked or already processed"}
+--- FAIL: TestIntegration_DockerNATSExecution (0.93s)
+=== RUN   TestSecurity_OciDigestMismatch
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Image digest mismatch: no RepoDigest canonical digest equals target
+--- PASS: TestSecurity_OciDigestMismatch (0.02s)
+=== RUN   TestSecurity_ImageID_Negative
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Image digest mismatch: no RepoDigest canonical digest equals target
+--- PASS: TestSecurity_ImageID_Negative (0.03s)
+=== RUN   TestApprovals_ProposedToApproved
+--- PASS: TestApprovals_ProposedToApproved (0.02s)
+=== RUN   TestApprovals_AlreadyApproved_Rejected
+--- PASS: TestApprovals_AlreadyApproved_Rejected (0.01s)
+=== RUN   TestApprovals_EmptyApprover_Rejected
+--- PASS: TestApprovals_EmptyApprover_Rejected (0.01s)
+=== RUN   TestApprovals_MissingRecommendation_Rejected
+--- PASS: TestApprovals_MissingRecommendation_Rejected (0.01s)
+=== RUN   TestConcurrency_DuplicateAuthorization
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 44ca7097-6290-4db3-867b-e67bd1b37380 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 44ca7097-6290-4db3-867b-e67bd1b37380 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 44ca7097-6290-4db3-867b-e67bd1b37380 completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 44ca7097-6290-4db3-867b-e67bd1b37380 verified: postcondition confirmed
+--- PASS: TestConcurrency_DuplicateAuthorization (0.04s)
+=== RUN   TestExecutor
+--- PASS: TestExecutor (0.00s)
+=== RUN   TestVerification_Success
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution c88370ec-42ab-4464-8c03-6fbee0bb6d34 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution c88370ec-42ab-4464-8c03-6fbee0bb6d34 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution c88370ec-42ab-4464-8c03-6fbee0bb6d34 completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution c88370ec-42ab-4464-8c03-6fbee0bb6d34 verified: postcondition confirmed
+--- PASS: TestVerification_Success (0.02s)
+=== RUN   TestVerification_RunningState
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 09b6cc87-5195-48c1-ae0d-897caf9d0882 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 09b6cc87-5195-48c1-ae0d-897caf9d0882 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 09b6cc87-5195-48c1-ae0d-897caf9d0882 completed but verification failed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container state "running" is not terminal (want exited or dead)
+--- PASS: TestVerification_RunningState (0.02s)
+=== RUN   TestVerification_RestartingState
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 5986d378-9786-457b-a07b-d3863f765606 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 5986d378-9786-457b-a07b-d3863f765606 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 5986d378-9786-457b-a07b-d3863f765606 completed but verification failed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container state "restarting" is not terminal (want exited or dead)
+--- PASS: TestVerification_RestartingState (0.02s)
+=== RUN   TestVerification_DigestMismatch
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Image digest mismatch: no RepoDigest canonical digest equals target
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 42823513-7037-4df6-b261-9feb77fb3fc7 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 42823513-7037-4df6-b261-9feb77fb3fc7 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 42823513-7037-4df6-b261-9feb77fb3fc7 completed but verification failed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: image digest verification failed: target "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" not found in RepoDigests [mock.registry/image@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]
+--- PASS: TestVerification_DigestMismatch (0.02s)
+=== RUN   TestVerification_ContainerIDMismatch
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 6f2376d4-0a52-4a10-923a-91db0d89f922 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 6f2376d4-0a52-4a10-923a-91db0d89f922 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 6f2376d4-0a52-4a10-923a-91db0d89f922 completed but verification failed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container ID mismatch: expected "034bcb86-ecea-42d9-adc5-b141914432d4" got "2e6e32bb-7aae-4bd9-8c45-937983005eda"
+--- PASS: TestVerification_ContainerIDMismatch (0.02s)
+=== RUN   TestVerification_InspectFailure
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 80ed782c-0645-460d-bece-b83c8db411cd claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 80ed782c-0645-460d-bece-b83c8db411cd started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 80ed782c-0645-460d-bece-b83c8db411cd completed but verification failed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: Docker inspect failed: docker daemon unavailable
+--- PASS: TestVerification_InspectFailure (0.02s)
+=== RUN   TestVerification_MultipleRepoDigests
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 6b58cbf3-c01d-4c1d-ba8c-1782d3f74abe claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 6b58cbf3-c01d-4c1d-ba8c-1782d3f74abe started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 6b58cbf3-c01d-4c1d-ba8c-1782d3f74abe completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 6b58cbf3-c01d-4c1d-ba8c-1782d3f74abe verified: postcondition confirmed
+--- PASS: TestVerification_MultipleRepoDigests (0.02s)
+=== RUN   TestVerification_ImageIDNegative
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Image digest mismatch: no RepoDigest canonical digest equals target
+--- PASS: TestVerification_ImageIDNegative (0.01s)
+=== RUN   TestVerification_EventEmission
+=== RUN   TestVerification_EventEmission/VERIFIED_emits_EXECUTION_VERIFIED
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 3341c873-0d5e-436f-97f3-7550d0fa4087 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 3341c873-0d5e-436f-97f3-7550d0fa4087 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 3341c873-0d5e-436f-97f3-7550d0fa4087 completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 3341c873-0d5e-436f-97f3-7550d0fa4087 verified: postcondition confirmed
+=== RUN   TestVerification_EventEmission/FAILED_verification_emits_EXECUTION_VERIFICATION_FAILED
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 604c804a-fe46-42b1-9ebb-a7b3d74057e5 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 604c804a-fe46-42b1-9ebb-a7b3d74057e5 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 604c804a-fe46-42b1-9ebb-a7b3d74057e5 completed but verification failed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container state "running" is not terminal (want exited or dead)
+--- PASS: TestVerification_EventEmission (0.02s)
+    --- PASS: TestVerification_EventEmission/VERIFIED_emits_EXECUTION_VERIFIED (0.01s)
+    --- PASS: TestVerification_EventEmission/FAILED_verification_emits_EXECUTION_VERIFICATION_FAILED (0.01s)
+=== RUN   TestVerification_Persistence
+=== RUN   TestVerification_Persistence/FAILED+NULL_from_mutation_failure
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution d167aa64-6e6d-4190-b793-4f099a875928 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution d167aa64-6e6d-4190-b793-4f099a875928 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_FAILED - Mutation error: docker daemon returned error
+=== RUN   TestVerification_Persistence/EXECUTED+FAILED_from_verification_failure
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 5a5f01ac-7ad4-40ce-9028-5252ae9217ae claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 5a5f01ac-7ad4-40ce-9028-5252ae9217ae started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 5a5f01ac-7ad4-40ce-9028-5252ae9217ae completed but verification failed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFICATION_FAILED - Verification failed: container state "restarting" is not terminal (want exited or dead)
+=== RUN   TestVerification_Persistence/EXECUTED+VERIFIED_from_successful_verification
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution cc201856-1573-4fe2-b221-8ecf7f9fd22a claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution cc201856-1573-4fe2-b221-8ecf7f9fd22a started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution cc201856-1573-4fe2-b221-8ecf7f9fd22a completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution cc201856-1573-4fe2-b221-8ecf7f9fd22a verified: postcondition confirmed
+--- PASS: TestVerification_Persistence (0.03s)
+    --- PASS: TestVerification_Persistence/FAILED+NULL_from_mutation_failure (0.01s)
+    --- PASS: TestVerification_Persistence/EXECUTED+FAILED_from_verification_failure (0.01s)
+    --- PASS: TestVerification_Persistence/EXECUTED+VERIFIED_from_successful_verification (0.01s)
+=== RUN   TestVerification_ReadOnlyGuarantee
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 00310d47-865c-48b5-9c1a-d3ad8f52a6f0 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 00310d47-865c-48b5-9c1a-d3ad8f52a6f0 started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 00310d47-865c-48b5-9c1a-d3ad8f52a6f0 completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 00310d47-865c-48b5-9c1a-d3ad8f52a6f0 verified: postcondition confirmed
+--- PASS: TestVerification_ReadOnlyGuarantee (0.02s)
+=== RUN   TestVerification_Idempotency
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution c9eec7df-8097-4c17-b479-0775012f5bbf claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution c9eec7df-8097-4c17-b479-0775012f5bbf started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution c9eec7df-8097-4c17-b479-0775012f5bbf completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution c9eec7df-8097-4c17-b479-0775012f5bbf verified: postcondition confirmed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+--- PASS: TestVerification_Idempotency (0.02s)
+=== RUN   TestExecutor_IdentityBinding_AdversarialPayload
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_REQUESTED - Execution 882b35b5-a163-403e-8f1e-db84ac64690e requested via NATS
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 882b35b5-a163-403e-8f1e-db84ac64690e claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 882b35b5-a163-403e-8f1e-db84ac64690e started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution 882b35b5-a163-403e-8f1e-db84ac64690e completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution 882b35b5-a163-403e-8f1e-db84ac64690e verified: postcondition confirmed
+--- PASS: TestExecutor_IdentityBinding_AdversarialPayload (0.02s)
+=== RUN   TestPhase75_ConcurrencyClaim
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution b7d4f6e4-827b-46af-8360-90cda2f12a5f claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution b7d4f6e4-827b-46af-8360-90cda2f12a5f started
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_ABORTED - Authorization revoked or already processed
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_SUCCEEDED - Execution b7d4f6e4-827b-46af-8360-90cda2f12a5f completed successfully
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_VERIFIED - Execution b7d4f6e4-827b-46af-8360-90cda2f12a5f verified: postcondition confirmed
+--- PASS: TestPhase75_ConcurrencyClaim (0.04s)
+=== RUN   TestPhase75_ResolvedIncidentRejection
+--- PASS: TestPhase75_ResolvedIncidentRejection (0.02s)
+=== RUN   TestPhase75_CrashAfterMutation
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_CLAIMED - Execution 3248aaa7-1f74-448b-91e3-727fac27fc16 claimed by executor
+2026/09/12 11:21:10 NATS not configured, cannot emit event: EXECUTION_STARTED - Execution 3248aaa7-1f74-448b-91e3-727fac27fc16 started
+--- PASS: TestPhase75_CrashAfterMutation (0.02s)
+=== RUN   TestPhase75_LedgerUpdateDeleteRejection
+--- PASS: TestPhase75_LedgerUpdateDeleteRejection (0.01s)
+FAIL
+FAIL	github.com/pavanvanish/zeraxis/engines/executor/internal/engine	1.698s
+FAIL

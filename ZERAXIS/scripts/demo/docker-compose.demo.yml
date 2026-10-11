@@ -1,0 +1,4 @@
+services:
+  executor-engine:
+    environment:
+      - AUTHORIZED_QUARANTINE_NETWORK=docker_zeraxis-lab

@@ -1,0 +1,30 @@
+=== RUN   TestVerification_Persistence/EXECUTED+VERIFIED_from_successful_verification
+    executor_verification_test.go:502: insert discovery_asset: pq: relation "discovery_assets" does not exist at column 13 (42P01)
+--- FAIL: TestVerification_Persistence (0.01s)
+    --- FAIL: TestVerification_Persistence/FAILED+NULL_from_mutation_failure (0.00s)
+    --- FAIL: TestVerification_Persistence/EXECUTED+FAILED_from_verification_failure (0.00s)
+    --- FAIL: TestVerification_Persistence/EXECUTED+VERIFIED_from_successful_verification (0.00s)
+=== RUN   TestVerification_ReadOnlyGuarantee
+    executor_verification_test.go:531: insert discovery_asset: pq: relation "discovery_assets" does not exist at column 13 (42P01)
+--- FAIL: TestVerification_ReadOnlyGuarantee (0.01s)
+=== RUN   TestVerification_Idempotency
+    executor_verification_test.go:563: insert discovery_asset: pq: relation "discovery_assets" does not exist at column 13 (42P01)
+--- FAIL: TestVerification_Idempotency (0.01s)
+=== RUN   TestExecutor_IdentityBinding_AdversarialPayload
+    executor_identity_test.go:55: asset: pq: relation "discovery_assets" does not exist at column 13 (42P01)
+--- FAIL: TestExecutor_IdentityBinding_AdversarialPayload (0.01s)
+=== RUN   TestPhase75_ConcurrencyClaim
+    executor_ledger_test.go:85: setup asset: pq: relation "discovery_assets" does not exist at column 13 (42P01)
+--- FAIL: TestPhase75_ConcurrencyClaim (0.01s)
+=== RUN   TestPhase75_ResolvedIncidentRejection
+    executor_ledger_test.go:119: setup asset: pq: relation "discovery_assets" does not exist at column 13 (42P01)
+--- FAIL: TestPhase75_ResolvedIncidentRejection (0.01s)
+=== RUN   TestPhase75_CrashAfterMutation
+    executor_ledger_test.go:143: setup asset: pq: relation "discovery_assets" does not exist at column 13 (42P01)
+--- FAIL: TestPhase75_CrashAfterMutation (0.01s)
+=== RUN   TestPhase75_LedgerUpdateDeleteRejection
+    executor_ledger_test.go:177: setup asset: pq: relation "discovery_assets" does not exist at column 13 (42P01)
+--- FAIL: TestPhase75_LedgerUpdateDeleteRejection (0.01s)
+FAIL
+FAIL	github.com/pavanvanish/zeraxis/engines/executor/internal/engine	1.483s
+FAIL

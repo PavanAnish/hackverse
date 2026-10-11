@@ -1,0 +1,27 @@
+--- internal/integration/phase9_e2e_test.go
++++ internal/integration/phase9_e2e_test.go
+@@ -10,6 +10,7 @@
+ 	"os"
+ 	"strings"
+ 	"testing"
+ 	"time"
++	"sync"
+ 
+ 	"github.com/google/uuid"
+@@ -37,13 +38,18 @@
+ 
+ type MockCache struct {
++	mu            sync.Mutex
+ 	invalidations map[string]int
+ }
+ func (m *MockCache) Invalidate(fingerprint string) error {
++	m.mu.Lock()
++	defer m.mu.Unlock()
+ 	m.invalidations[fingerprint]++
+ 	return nil
+ }
+ func (m *MockCache) GetCount(fingerprint string) int {
++	m.mu.Lock()
++	defer m.mu.Unlock()
+ 	return m.invalidations[fingerprint]
+ }
