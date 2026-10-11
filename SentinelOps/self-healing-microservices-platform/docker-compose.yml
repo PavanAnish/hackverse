@@ -1,0 +1,157 @@
+version: '3.8'
+
+services:
+  postgres:
+    restart: unless-stopped
+    image: pgvector/pgvector:pg15
+    container_name: sentinelops-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    restart: unless-stopped
+    image: redis:7-alpine
+    container_name: sentinelops-redis
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    restart: unless-stopped
+    image: rabbitmq:3-management-alpine
+    container_name: sentinelops-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  order-service:
+    restart: unless-stopped
+    build: ./services/order-service
+    container_name: sentinelops-order-service
+    ports:
+      - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  payment-service:
+    restart: unless-stopped
+    build: ./services/payment-service
+    container_name: sentinelops-payment-service
+    ports:
+      - "8002:8000"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/1
+      - RABBITMQ_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  inventory-service:
+    restart: unless-stopped
+    build: ./services/inventory-service
+    container_name: sentinelops-inventory-service
+    ports:
+      - "8003:8000"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/2
+      - RABBITMQ_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  prometheus:
+    restart: unless-stopped
+    image: prom/prometheus:latest
+    container_name: sentinelops-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+    restart: unless-stopped
+    image: grafana/grafana:latest
+    container_name: sentinelops-grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  ai-agent:
+    restart: unless-stopped
+    build: ./ai-agent
+    container_name: sentinelops-ai-agent
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/3
+      - RABBITMQ_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - HEAL_DEADLINE_SECONDS=15
+      - HEAL_MIN_SECONDS=10
+      - APPROVAL_MIN_SECONDS=15
+      - BREAKER_MAX_REMEDIATIONS=${BREAKER_MAX_REMEDIATIONS:-1000}
+    ports:
+      - "8000:8000"
+    volumes:
+      # KNOWN TRADE-OFF: Mounting docker.sock gives root-equivalent access to the host daemon.
+      # This is risky, but mitigated because the LLM's action space is hard-bounded by 
+      # schemas.py Enums. Only pre-validated enum values reach the remediation execution.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  dashboard:
+    restart: unless-stopped
+    build: ./dashboard
+    container_name: sentinelops-dashboard
+    ports:
+      - "3001:80"
+    depends_on:
+      - ai-agent
+
+  storefront:
+    restart: unless-stopped
+    build: ./storefront
+    container_name: sentinelops-storefront
+    ports:
+      - "3002:80"
+    depends_on:
+      - payment-service
+
+volumes:
+  postgres_data:
